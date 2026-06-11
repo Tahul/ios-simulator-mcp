@@ -1,7 +1,9 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import pkg from '../package.json' with { type: 'json' }
 import { registerAppTools } from './tools/apps'
+import { registerBootTools } from './tools/boot'
 import { registerDeviceTools } from './tools/device'
+import { registerExpoTools } from './tools/expo'
 import { registerFindElementTool } from './tools/find-element'
 import { registerLogTools } from './tools/logs'
 import { registerRecordingTools } from './tools/recording'
@@ -26,9 +28,9 @@ Workflow:
 - Find bundle identifiers with list_apps instead of guessing.
 
 Expo / React Native:
+- To start an Expo app, use expo_launch — it boots a simulator if needed, waits for Metro, resolves the exact deep link (dev client or Expo Go) from Metro, and opens it in one call. Pass runtime="custom" for a dev build, "expo" for Expo Go.
 - NEVER pass EX_UPDATES_URL or any EX_UPDATES_* env var to launch_app — it sends expo-updates into a reload loop against Metro. These keys are rejected.
-- Dev-client builds connect to Metro automatically: launch with bundle_id (+ terminate_running) only.
-- To target a specific Metro instance or deep link, use open_url with the exp:// or dev-client URL that Metro prints.`
+- Only fall back to launch_app/open_url if you specifically need to bypass Metro resolution.`
 
 export function createServer(): McpServer {
   const server = new McpServer(
@@ -42,6 +44,8 @@ export function createServer(): McpServer {
   )
 
   registerSimulatorTools(server)
+  registerBootTools(server)
+  registerExpoTools(server)
   registerUiTools(server)
   registerSnapshotTools(server)
   registerFindElementTool(server)

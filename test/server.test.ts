@@ -41,7 +41,9 @@ describe('createServer', () => {
     const names = registeredToolNames(createServer())
     expect(names.sort()).toEqual([
       'app_logs',
+      'boot_sim',
       'cleanup_session',
+      'expo_launch',
       'get_booted_sim_id',
       'install_app',
       'launch_app',

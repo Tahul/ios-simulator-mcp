@@ -26,6 +26,7 @@ bun run dev        # MCP inspector against src/index.ts
 - `src/tools/` — one module per tool group (`simulator`, `ui`, `snapshot`, `find-element`, `screenshot`, `recording`, `logs`, `apps`, `device`). Each exports its handlers (for tests) and a `registerXxxTools(server)` function that honors `IOS_SIMULATOR_MCP_FILTERED_TOOLS`.
 - `src/tools/snapshot.ts` also owns the ref system: `ui_snapshot` assigns short refs (e1, e2, ...) to visible elements; `ui_tap`/`ui_type` resolve `ref`/`label` targets through `resolveTarget`. Refs are invalidated by the next snapshot.
 - `src/server.ts` ships agent-facing usage instructions (incl. Expo EX_UPDATES_* guidance) via the MCP initialize response; `buildLaunchArgs` rejects EX_UPDATES_* env keys.
+- Expo launches go through `src/tools/expo.ts` (`expo_launch`), which orchestrates `ensureBooted` ([src/lib/devices.ts](src/lib/devices.ts), boots + polls for the real Booted state) and the Metro client ([src/lib/metro.ts](src/lib/metro.ts), `/_expo/open` deep-link resolution with a construction fallback). `boot_sim` ([src/tools/boot.ts](src/tools/boot.ts)) exposes booting standalone. Both Metro fetch and the exec layer have test seams (`fetchImpl`, `setRunner`).
 - `test/` — bun:test suite. Process execution is stubbed via `setRunner` / `setSpawner`; no simulator needed.
 
 ## Design Principles

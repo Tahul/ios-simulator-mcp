@@ -56,6 +56,7 @@ claude mcp add ios-simulator -- bunx @yaelg/ios-simulator-mcp
 | `ui_type` | Input text; pass `ref`/`label` to focus the field first |
 | `ui_swipe` | Swipe gesture |
 | `open_url` | Open https://, deep links, or exp:// dev-client URLs |
+| `expo_launch` | One-call Expo launch: boot + wait for Metro + resolve deep link + open |
 
 ### Apps
 
@@ -73,6 +74,7 @@ claude mcp add ios-simulator -- bunx @yaelg/ios-simulator-mcp
 | Tool | Description |
 | --- | --- |
 | `get_booted_sim_id` | Get the booted simulator's UDID (rarely needed — see below) |
+| `boot_sim` | Boot a simulator by udid/name and wait until it is actually ready |
 | `open_simulator` | Open the iOS Simulator application |
 | `set_permissions` | Grant/revoke/reset privacy permissions (camera, location, ...) |
 | `push_notification` | Deliver a simulated APNs push |
@@ -90,6 +92,17 @@ claude mcp add ios-simulator -- bunx @yaelg/ios-simulator-mcp
 | `stop_recording` | Stop an open-ended recording |
 
 All tools accept an optional `udid`; when omitted, the currently booted simulator is used. The server also ships usage instructions via the MCP `initialize` response (including Expo/Metro guidance), which compatible hosts surface to the agent automatically.
+
+### Launching Expo apps
+
+`expo_launch` is the reliable, one-call path for starting an Expo app on the simulator. It:
+
+1. boots a simulator if none is ready (and waits for the real `Booted` state — `simctl boot` returns early),
+2. waits for the Metro dev server to respond,
+3. asks Metro's `/_expo/open` endpoint for the exact deep link (dev client or Expo Go) instead of guessing the URL scheme, falling back to constructing it from the scheme + host,
+4. opens the link with `simctl openurl` (adding `disableOnboarding=1` for dev-client first launch).
+
+It never uses `EX_UPDATES_*` env vars (the source of expo-updates reload loops). Force a runtime with `runtime: "custom"` (dev build) or `"expo"` (Expo Go); point at a non-default server with `metro_url`.
 
 ## Configuration
 
