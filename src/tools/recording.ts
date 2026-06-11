@@ -1,0 +1,236 @@
+import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
+import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
+import type { Buffer } from 'node:buffer'
+import { spawn } from 'node:child_process'
+import { z } from 'zod'
+import { isToolFiltered, udidSchema } from '../lib/constants'
+import { getBootedDeviceId } from '../lib/devices'
+import { errorResult, textResult } from '../lib/errors'
+import { ensureAbsolutePath } from '../lib/paths'
+import { run } from '../lib/run'
+
+/** Minimal child-process surface needed for recording, satisfied by ChildProcess. */
+export interface RecordingProcess {
+  stderr: {
+    on: (event: 'data', listener: (data: Buffer) => void) => unknown
+    off: (event: 'data', listener: (data: Buffer) => void) => unknown
+  } | null
+  on: (event: 'exit', listener: (code: number | null) => void) => unknown
+  off: (event: 'exit', listener: (code: number | null) => void) => unknown
+  once: (event: 'exit', listener: (code: number | null) => void) => unknown
+  kill: (signal?: NodeJS.Signals) => boolean
+  exitCode: number | null
+  killed: boolean
+}
+
+export type Spawner = (cmd: string, args: string[]) => RecordingProcess
+
+const defaultSpawner: Spawner = (cmd, args) => spawn(cmd, args)
+
+let currentSpawner: Spawner = defaultSpawner
+
+/** Test seam: replace the process spawner. Pass `null` to restore the default. */
+export function setSpawner(spawner: Spawner | null): void {
+  currentSpawner = spawner ?? defaultSpawner
+}
+
+// The active recording process, tracked so stop_recording can terminate
+// exactly the recording this server started instead of pkill-ing globally.
+let activeRecording: RecordingProcess | null = null
+
+/** Test seam: clear the tracked recording between tests. */
+export function resetRecordingState(): void {
+  activeRecording = null
+}
+
+const START_TIMEOUT_MS = 5000
+const STOP_TIMEOUT_MS = 5000
+
+/**
+ * Waits until simctl reports "Recording started" on stderr, the process
+ * exits early (failure), or the timeout elapses (assume started if the
+ * process is still alive). Listeners and the timer are always cleaned up.
+ */
+function waitForRecordingStart(proc: RecordingProcess): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    let errorOutput = ''
+    let settled = false
+    let timer: ReturnType<typeof setTimeout>
+
+    function settle(fn: () => void): void {
+      if (settled)
+        return
+      settled = true
+      clearTimeout(timer)
+      proc.stderr?.off('data', onData)
+      proc.off('exit', onExit)
+      fn()
+    }
+
+    function onData(data: Buffer): void {
+      const message = data.toString()
+      if (message.includes('Recording started'))
+        settle(() => resolve())
+      else
+        errorOutput += message
+    }
+
+    function onExit(code: number | null): void {
+      settle(() => reject(new Error(
+        errorOutput.trim() || `Recording process exited early with code ${code}`,
+      )))
+    }
+
+    timer = setTimeout(() => {
+      if (proc.killed || proc.exitCode !== null) {
+        settle(() => reject(new Error(
+          errorOutput.trim() || 'Recording process terminated unexpectedly',
+        )))
+      }
+      else {
+        // Still running with no error output — assume the recording started
+        settle(() => resolve())
+      }
+    }, START_TIMEOUT_MS)
+
+    proc.stderr?.on('data', onData)
+    proc.on('exit', onExit)
+  })
+}
+
+export interface RecordVideoParams {
+  udid?: string
+  output_path?: string
+  codec?: 'h264' | 'hevc'
+  display?: 'internal' | 'external'
+  mask?: 'ignored' | 'alpha' | 'black'
+  force?: boolean
+}
+
+export async function recordVideoHandler({ udid, output_path, codec, display, mask, force }: RecordVideoParams): Promise<CallToolResult> {
+  try {
+    if (activeRecording && activeRecording.exitCode === null) {
+      throw new Error(
+        'A recording is already in progress. Stop it first with stop_recording.',
+      )
+    }
+
+    const actualUdid = await getBootedDeviceId(udid)
+    const defaultFileName = `simulator_recording_${Date.now()}.mp4`
+    const outputFile = ensureAbsolutePath(output_path ?? defaultFileName)
+
+    const recordingProcess = currentSpawner('xcrun', [
+      'simctl',
+      'io',
+      actualUdid,
+      'recordVideo',
+      ...(codec ? [`--codec=${codec}`] : []),
+      ...(display ? [`--display=${display}`] : []),
+      ...(mask ? [`--mask=${mask}`] : []),
+      ...(force ? ['--force'] : []),
+      '--',
+      outputFile,
+    ])
+
+    await waitForRecordingStart(recordingProcess)
+
+    activeRecording = recordingProcess
+    recordingProcess.on('exit', () => {
+      if (activeRecording === recordingProcess)
+        activeRecording = null
+    })
+
+    return textResult(
+      `Recording started. The video will be saved to: ${outputFile}\nTo stop recording, use the stop_recording command.`,
+    )
+  }
+  catch (error) {
+    return errorResult('Error starting recording', error)
+  }
+}
+
+export async function stopRecordingHandler(): Promise<CallToolResult> {
+  try {
+    const proc = activeRecording
+
+    if (proc && proc.exitCode === null) {
+      const exited = new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, STOP_TIMEOUT_MS)
+        proc.once('exit', () => {
+          clearTimeout(timer)
+          resolve()
+        })
+      })
+      proc.kill('SIGINT')
+      await exited
+      activeRecording = null
+      return textResult('Recording stopped successfully.')
+    }
+
+    // Fallback for recordings not started by this server instance.
+    try {
+      await run('pkill', ['-SIGINT', '-f', 'simctl.*recordVideo'])
+    }
+    catch (error) {
+      // pkill exits with code 1 when no process matched
+      if ((error as { code?: number }).code === 1)
+        return textResult('No active recording found.')
+      throw error
+    }
+
+    // Give simctl a moment to finalize the video file
+    await new Promise(resolve => setTimeout(resolve, 1000))
+
+    return textResult('Recording stopped successfully.')
+  }
+  catch (error) {
+    return errorResult('Error stopping recording', error)
+  }
+}
+
+export function registerRecordingTools(server: McpServer): void {
+  if (!isToolFiltered('record_video')) {
+    server.tool(
+      'record_video',
+      'Records a video of the iOS Simulator using simctl directly',
+      {
+        udid: udidSchema,
+        output_path: z
+          .string()
+          .max(1024)
+          .optional()
+          .describe(
+            'Optional output path. If not provided, a default name will be used. The file will be saved in the directory specified by `IOS_SIMULATOR_MCP_DEFAULT_OUTPUT_DIR` or in `~/Downloads` if the environment variable is not set.',
+          ),
+        codec: z
+          .enum(['h264', 'hevc'])
+          .optional()
+          .describe('Specifies the codec type: "h264" or "hevc". Default is "hevc".'),
+        display: z
+          .enum(['internal', 'external'])
+          .optional()
+          .describe('Display to capture: "internal" or "external". Default depends on device type.'),
+        mask: z
+          .enum(['ignored', 'alpha', 'black'])
+          .optional()
+          .describe('For non-rectangular displays, handle the mask by policy: "ignored", "alpha", or "black".'),
+        force: z
+          .boolean()
+          .optional()
+          .describe('Force the output file to be written to, even if the file already exists.'),
+      },
+      { title: 'Record Video', readOnlyHint: false, openWorldHint: true },
+      recordVideoHandler,
+    )
+  }
+
+  if (!isToolFiltered('stop_recording')) {
+    server.tool(
+      'stop_recording',
+      'Stops the simulator video recording started by record_video',
+      {},
+      { title: 'Stop Recording', readOnlyHint: false, openWorldHint: true },
+      stopRecordingHandler,
+    )
+  }
+}

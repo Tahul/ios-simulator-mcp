@@ -1,0 +1,71 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Release artifacts must match the latest code on main. A tag pushed from
+      # an older local commit would otherwise publish that stale snapshot.
+      - name: Verify tag points at latest main
+        run: |
+          set -e
+          git fetch origin main:refs/remotes/origin/main
+          TAG_COMMIT=$(git rev-list -n 1 "$GITHUB_REF_NAME")
+          MAIN_COMMIT=$(git rev-parse refs/remotes/origin/main)
+          if [ "$TAG_COMMIT" != "$MAIN_COMMIT" ]; then
+            echo "::error::${GITHUB_REF_NAME} points to ${TAG_COMMIT}, but origin/main is ${MAIN_COMMIT}. Move the tag to the latest main commit before releasing."
+            exit 1
+          fi
+          echo "${GITHUB_REF_NAME} points at latest main (${MAIN_COMMIT})"
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      # `bun publish` reads `~/.npmrc` for the auth token but — unlike
+      # `npm publish` — does NOT substitute `${VAR}` references in it, so we
+      # write the literal token here. It is masked in logs as a GitHub secret.
+      - name: Configure npm auth
+        run: |
+          {
+            echo "//registry.npmjs.org/:_authToken=${{ secrets.NPM_TOKEN }}"
+            echo "registry=https://registry.npmjs.org"
+            echo "always-auth=true"
+          } > ~/.npmrc
+
+      - name: Install
+        run: bun install --frozen-lockfile
+
+      # Quality gates before anything is published.
+      - name: Lint
+        run: bun run lint
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Test
+        run: bun test
+
+      - name: Build
+        run: bun run build
+
+      - name: Generate GitHub release
+        run: bunx changelogithub
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish
+        run: bun publish --access public

@@ -1,0 +1,3 @@
+# `bun test` runs the suite under `test/` only.
+[test]
+root = "test"
