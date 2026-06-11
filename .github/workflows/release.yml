@@ -35,17 +35,6 @@ jobs:
         with:
           bun-version: latest
 
-      # `bun publish` reads `~/.npmrc` for the auth token but — unlike
-      # `npm publish` — does NOT substitute `${VAR}` references in it, so we
-      # write the literal token here. It is masked in logs as a GitHub secret.
-      - name: Configure npm auth
-        run: |
-          {
-            echo "//registry.npmjs.org/:_authToken=${{ secrets.NPM_TOKEN }}"
-            echo "registry=https://registry.npmjs.org"
-            echo "always-auth=true"
-          } > ~/.npmrc
-
       - name: Install
         run: bun install --frozen-lockfile
 
@@ -67,5 +56,11 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      # `bun publish` on the Linux runner does not reliably pick up
+      # `~/.npmrc` (verified: it fails with "missing authentication" even
+      # with a literal token written there). NPM_CONFIG_TOKEN is bun's
+      # native auth env var and works (verified locally with a clean HOME).
       - name: Publish
         run: bun publish --access public
+        env:
+          NPM_CONFIG_TOKEN: ${{ secrets.NPM_TOKEN }}
