@@ -104,4 +104,37 @@ describe('ui_type', () => {
       '--rm -rf',
     ])
   })
+
+  it('taps the target field first when a label is given', async () => {
+    const tree = [
+      {
+        type: 'TextField',
+        AXUniqueId: 'email-field',
+        frame: { x: 20, y: 300, width: 353, height: 44 },
+      },
+    ]
+    const calls: RecordedCall[] = []
+    setRunner((cmd, args) => {
+      calls.push({ cmd, args })
+      const isDescribe = args.includes('describe-all')
+      return Promise.resolve({ stdout: isDescribe ? JSON.stringify(tree) : '', stderr: '' })
+    })
+
+    const result = await uiTypeHandler({ udid: UDID, text: 'hello', label: 'email-field' })
+
+    expect(result.isError).toBe(false)
+    expect(calls.map(call => call.args[1])).toEqual(['describe-all', 'tap', 'text'])
+  })
+})
+
+describe('ui_tap with ref/label targeting', () => {
+  it('rejects calls without any target', async () => {
+    recordCalls()
+
+    const result = await uiTapHandler({ udid: UDID })
+
+    expect(result.isError).toBe(true)
+    const block = result.content[0]
+    expect(block?.type === 'text' && block.text).toContain('Provide either')
+  })
 })

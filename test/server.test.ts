@@ -40,20 +40,33 @@ describe('createServer', () => {
     delete process.env.IOS_SIMULATOR_MCP_FILTERED_TOOLS
     const names = registeredToolNames(createServer())
     expect(names.sort()).toEqual([
+      'app_logs',
+      'cleanup_session',
       'get_booted_sim_id',
       'install_app',
       'launch_app',
+      'list_apps',
       'open_simulator',
+      'open_url',
+      'push_notification',
       'record_video',
       'screenshot',
+      'set_appearance',
+      'set_location',
+      'set_permissions',
+      'status_bar',
       'stop_recording',
+      'terminate_app',
       'ui_describe_all',
       'ui_describe_point',
       'ui_find_element',
+      'ui_snapshot',
       'ui_swipe',
       'ui_tap',
       'ui_type',
       'ui_view',
+      'uninstall_app',
+      'wait_for_element',
     ])
   })
 

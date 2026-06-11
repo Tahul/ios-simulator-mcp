@@ -28,12 +28,39 @@ export function ensureAbsolutePath(filePath: string): string {
   return path.join(defaultDir, filePath)
 }
 
+const TMP_PREFIX = 'ios-simulator-mcp-'
+
 let tmpRoot: string | null = null
 
 /** Lazily creates (and caches) a private temp directory for intermediate files. */
 export function getTmpRoot(): string {
-  tmpRoot ??= fs.mkdtempSync(path.join(os.tmpdir(), 'ios-simulator-mcp-'))
+  tmpRoot ??= fs.mkdtempSync(path.join(os.tmpdir(), TMP_PREFIX))
   return tmpRoot
+}
+
+/**
+ * Removes temp directories left behind by previous server instances that
+ * crashed or were killed before their exit cleanup ran. The current
+ * instance's directory is preserved.
+ */
+export function cleanupStaleTmpDirs(): number {
+  let removed = 0
+  const tmpDir = os.tmpdir()
+  const currentName = tmpRoot ? path.basename(tmpRoot) : null
+
+  for (const entry of fs.readdirSync(tmpDir)) {
+    if (!entry.startsWith(TMP_PREFIX) || entry === currentName)
+      continue
+    try {
+      fs.rmSync(path.join(tmpDir, entry), { recursive: true, force: true })
+      removed += 1
+    }
+    catch {
+      // ignore directories we cannot remove
+    }
+  }
+
+  return removed
 }
 
 /** Removes the temp directory if it was created. Safe to call multiple times. */

@@ -30,14 +30,20 @@ export function textResult(text: string): CallToolResult {
   }
 }
 
-/** Builds an error tool result with a troubleshooting link appended. */
-export function errorResult(prefix: string, error: unknown): CallToolResult {
+/**
+ * Builds an error tool result with an optional recovery hint and a
+ * troubleshooting link appended. Hints tell the agent what to do next
+ * so it can recover in one turn.
+ */
+export function errorResult(prefix: string, error: unknown, hint?: string): CallToolResult {
+  const message = `${prefix}: ${toError(error).message}`
+  const withHint = hint ? `${message}\n\nHint: ${hint}` : message
   return {
     isError: true,
     content: [
       {
         type: 'text',
-        text: errorWithTroubleshooting(`${prefix}: ${toError(error).message}`),
+        text: errorWithTroubleshooting(withHint),
       },
     ],
   }

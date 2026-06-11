@@ -98,7 +98,9 @@ export function registerFindElementTool(server: McpServer): void {
 
   server.tool(
     'ui_find_element',
-    'Searches the accessibility tree and returns elements matching the given criteria',
+    'Searches the accessibility tree and returns full JSON for elements matching the given criteria (label, '
+    + 'identifier, type). Use when you need element details like exact frames; for general screen orientation '
+    + 'prefer ui_snapshot, and to wait for something to appear use wait_for_element.',
     {
       udid: udidSchema,
       search: z

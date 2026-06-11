@@ -80,6 +80,20 @@ describe('record_video', () => {
     expect(firstText(result)).toContain('Invalid device')
   })
 
+  it('records for duration_s then stops automatically and returns the path', async () => {
+    const fake = new FakeRecordingProcess()
+    setSpawner(() => {
+      setTimeout(() => fake.stderr.emit('data', Buffer.from('Recording started')), 0)
+      return fake
+    })
+
+    const result = await recordVideoHandler({ udid: UDID, output_path: '/tmp/clip.mp4', duration_s: 0.05 })
+
+    expect(result.isError).toBe(false)
+    expect(fake.lastSignal).toBe('SIGINT')
+    expect(firstText(result)).toContain('Recording complete. Video saved to: /tmp/clip.mp4')
+  })
+
   it('refuses to start a second recording while one is active', async () => {
     const fake = new FakeRecordingProcess()
     setSpawner(() => {

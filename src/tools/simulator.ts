@@ -29,7 +29,9 @@ export function registerSimulatorTools(server: McpServer): void {
   if (!isToolFiltered('get_booted_sim_id')) {
     server.tool(
       'get_booted_sim_id',
-      'Get the ID of the currently booted iOS simulator',
+      'Returns the name and UDID of the currently booted iOS simulator. Rarely needed: every other tool already '
+      + 'defaults to the booted simulator when udid is omitted — only call this when you must target a specific '
+      + 'device among several booted ones.',
       { title: 'Get Booted Simulator ID', readOnlyHint: true, openWorldHint: true },
       getBootedSimIdHandler,
     )
@@ -38,8 +40,9 @@ export function registerSimulatorTools(server: McpServer): void {
   if (!isToolFiltered('open_simulator')) {
     server.tool(
       'open_simulator',
-      'Opens the iOS Simulator application',
-      { title: 'Open Simulator', readOnlyHint: false, openWorldHint: true },
+      'Opens the iOS Simulator application on the host Mac (boots the default device if none is running). '
+      + 'Call this first if other tools report "No booted simulator found".',
+      { title: 'Open Simulator', readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
       openSimulatorHandler,
     )
   }

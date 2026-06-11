@@ -1,24 +1,56 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import pkg from '../package.json' with { type: 'json' }
 import { registerAppTools } from './tools/apps'
+import { registerDeviceTools } from './tools/device'
 import { registerFindElementTool } from './tools/find-element'
+import { registerLogTools } from './tools/logs'
 import { registerRecordingTools } from './tools/recording'
 import { registerScreenshotTools } from './tools/screenshot'
+import { registerSessionTools } from './tools/session'
 import { registerSimulatorTools } from './tools/simulator'
+import { registerSnapshotTools } from './tools/snapshot'
 import { registerUiTools } from './tools/ui'
 
+/**
+ * Server-level usage guidance, surfaced to MCP hosts via the initialize
+ * response. Hosts like zidane render these into the agent's system context.
+ */
+const INSTRUCTIONS = `iOS Simulator automation. Tools wrap \`xcrun simctl\` and Facebook idb.
+
+Workflow:
+- Every tool accepts an optional \`udid\` and defaults to the currently booted simulator — do not call get_booted_sim_id first.
+- See the screen with ui_snapshot (compact, ref-based) and ui_view (image). Prefer ui_snapshot over ui_describe_all.
+- Act by passing \`ref\` (from the latest ui_snapshot) or \`label\` to ui_tap / ui_type instead of raw coordinates. Coordinates are in points and match ui_view images.
+- After navigation or launches, use wait_for_element instead of sleeping and re-describing.
+- Debug with app_logs (JS errors, RedBox, native crashes) — do not rely on screenshots alone.
+- Find bundle identifiers with list_apps instead of guessing.
+
+Expo / React Native:
+- NEVER pass EX_UPDATES_URL or any EX_UPDATES_* env var to launch_app — it sends expo-updates into a reload loop against Metro. These keys are rejected.
+- Dev-client builds connect to Metro automatically: launch with bundle_id (+ terminate_running) only.
+- To target a specific Metro instance or deep link, use open_url with the exp:// or dev-client URL that Metro prints.`
+
 export function createServer(): McpServer {
-  const server = new McpServer({
-    name: 'ios-simulator',
-    version: pkg.version,
-  })
+  const server = new McpServer(
+    {
+      name: 'ios-simulator',
+      version: pkg.version,
+    },
+    {
+      instructions: INSTRUCTIONS,
+    },
+  )
 
   registerSimulatorTools(server)
   registerUiTools(server)
+  registerSnapshotTools(server)
   registerFindElementTool(server)
   registerScreenshotTools(server)
   registerRecordingTools(server)
+  registerLogTools(server)
   registerAppTools(server)
+  registerDeviceTools(server)
+  registerSessionTools(server)
 
   return server
 }

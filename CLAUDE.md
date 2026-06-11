@@ -23,7 +23,9 @@ bun run dev        # MCP inspector against src/index.ts
 - `src/index.ts` — executable entry: creates the server, connects stdio transport, cleans up on exit. stdout is the MCP protocol channel; log to stderr only.
 - `src/server.ts` — `createServer()`: registers all tool modules.
 - `src/lib/` — shared helpers: `run.ts` (process execution with a `setRunner` test seam, `idb` resolution), `devices.ts` (booted-device discovery via `simctl list devices --json`), `paths.ts` (path expansion, temp dir), `errors.ts` (tool result builders), `constants.ts` (UDID schema, tool filtering).
-- `src/tools/` — one module per tool group (`simulator`, `ui`, `find-element`, `screenshot`, `recording`, `apps`). Each exports its handlers (for tests) and a `registerXxxTools(server)` function that honors `IOS_SIMULATOR_MCP_FILTERED_TOOLS`.
+- `src/tools/` — one module per tool group (`simulator`, `ui`, `snapshot`, `find-element`, `screenshot`, `recording`, `logs`, `apps`, `device`). Each exports its handlers (for tests) and a `registerXxxTools(server)` function that honors `IOS_SIMULATOR_MCP_FILTERED_TOOLS`.
+- `src/tools/snapshot.ts` also owns the ref system: `ui_snapshot` assigns short refs (e1, e2, ...) to visible elements; `ui_tap`/`ui_type` resolve `ref`/`label` targets through `resolveTarget`. Refs are invalidated by the next snapshot.
+- `src/server.ts` ships agent-facing usage instructions (incl. Expo EX_UPDATES_* guidance) via the MCP initialize response; `buildLaunchArgs` rejects EX_UPDATES_* env keys.
 - `test/` — bun:test suite. Process execution is stubbed via `setRunner` / `setSpawner`; no simulator needed.
 
 ## Design Principles

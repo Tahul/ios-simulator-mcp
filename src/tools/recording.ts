@@ -105,9 +105,23 @@ export interface RecordVideoParams {
   display?: 'internal' | 'external'
   mask?: 'ignored' | 'alpha' | 'black'
   force?: boolean
+  duration_s?: number
 }
 
-export async function recordVideoHandler({ udid, output_path, codec, display, mask, force }: RecordVideoParams): Promise<CallToolResult> {
+/** Sends SIGINT and waits for the process to exit (bounded by STOP_TIMEOUT_MS). */
+async function stopProcess(proc: RecordingProcess): Promise<void> {
+  const exited = new Promise<void>((resolve) => {
+    const timer = setTimeout(resolve, STOP_TIMEOUT_MS)
+    proc.once('exit', () => {
+      clearTimeout(timer)
+      resolve()
+    })
+  })
+  proc.kill('SIGINT')
+  await exited
+}
+
+export async function recordVideoHandler({ udid, output_path, codec, display, mask, force, duration_s }: RecordVideoParams): Promise<CallToolResult> {
   try {
     if (activeRecording && activeRecording.exitCode === null) {
       throw new Error(
@@ -134,6 +148,14 @@ export async function recordVideoHandler({ udid, output_path, codec, display, ma
 
     await waitForRecordingStart(recordingProcess)
 
+    // Time-boxed mode: record for duration_s, stop, and return the path —
+    // no start/act/stop choreography needed.
+    if (duration_s != null) {
+      await new Promise(resolve => setTimeout(resolve, duration_s * 1000))
+      await stopProcess(recordingProcess)
+      return textResult(`Recording complete. Video saved to: ${outputFile}`)
+    }
+
     activeRecording = recordingProcess
     recordingProcess.on('exit', () => {
       if (activeRecording === recordingProcess)
@@ -149,39 +171,40 @@ export async function recordVideoHandler({ udid, output_path, codec, display, ma
   }
 }
 
+/**
+ * Stops the tracked recording if there is one, otherwise SIGINTs any
+ * orphaned `simctl recordVideo` process (e.g. from a previous server
+ * instance). Returns a human-readable summary. Shared with cleanup_session.
+ */
+export async function stopAnyRecording(): Promise<string> {
+  const proc = activeRecording
+
+  if (proc && proc.exitCode === null) {
+    await stopProcess(proc)
+    activeRecording = null
+    return 'Recording stopped successfully.'
+  }
+
+  // Fallback for recordings not started by this server instance.
+  try {
+    await run('pkill', ['-SIGINT', '-f', 'simctl.*recordVideo'])
+  }
+  catch (error) {
+    // pkill exits with code 1 when no process matched
+    if ((error as { code?: number }).code === 1)
+      return 'No active recording found.'
+    throw error
+  }
+
+  // Give simctl a moment to finalize the video file
+  await new Promise(resolve => setTimeout(resolve, 1000))
+
+  return 'Recording stopped successfully.'
+}
+
 export async function stopRecordingHandler(): Promise<CallToolResult> {
   try {
-    const proc = activeRecording
-
-    if (proc && proc.exitCode === null) {
-      const exited = new Promise<void>((resolve) => {
-        const timer = setTimeout(resolve, STOP_TIMEOUT_MS)
-        proc.once('exit', () => {
-          clearTimeout(timer)
-          resolve()
-        })
-      })
-      proc.kill('SIGINT')
-      await exited
-      activeRecording = null
-      return textResult('Recording stopped successfully.')
-    }
-
-    // Fallback for recordings not started by this server instance.
-    try {
-      await run('pkill', ['-SIGINT', '-f', 'simctl.*recordVideo'])
-    }
-    catch (error) {
-      // pkill exits with code 1 when no process matched
-      if ((error as { code?: number }).code === 1)
-        return textResult('No active recording found.')
-      throw error
-    }
-
-    // Give simctl a moment to finalize the video file
-    await new Promise(resolve => setTimeout(resolve, 1000))
-
-    return textResult('Recording stopped successfully.')
+    return textResult(await stopAnyRecording())
   }
   catch (error) {
     return errorResult('Error stopping recording', error)
@@ -192,7 +215,9 @@ export function registerRecordingTools(server: McpServer): void {
   if (!isToolFiltered('record_video')) {
     server.tool(
       'record_video',
-      'Records a video of the iOS Simulator using simctl directly',
+      'Records a video of the iOS Simulator screen and returns the output path. Two modes: pass duration_s to record '
+      + 'for a fixed time and get the finished file back in one call (preferred), or omit it to start an open-ended '
+      + 'recording that you must end with stop_recording. Only one recording can be active at a time.',
       {
         udid: udidSchema,
         output_path: z
@@ -202,6 +227,12 @@ export function registerRecordingTools(server: McpServer): void {
           .describe(
             'Optional output path. If not provided, a default name will be used. The file will be saved in the directory specified by `IOS_SIMULATOR_MCP_DEFAULT_OUTPUT_DIR` or in `~/Downloads` if the environment variable is not set.',
           ),
+        duration_s: z
+          .number()
+          .min(1)
+          .max(600)
+          .optional()
+          .describe('Record for this many seconds, then stop automatically and return the file path. Omit for open-ended recording.'),
         codec: z
           .enum(['h264', 'hevc'])
           .optional()
@@ -219,7 +250,7 @@ export function registerRecordingTools(server: McpServer): void {
           .optional()
           .describe('Force the output file to be written to, even if the file already exists.'),
       },
-      { title: 'Record Video', readOnlyHint: false, openWorldHint: true },
+      { title: 'Record Video', readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
       recordVideoHandler,
     )
   }
@@ -227,9 +258,10 @@ export function registerRecordingTools(server: McpServer): void {
   if (!isToolFiltered('stop_recording')) {
     server.tool(
       'stop_recording',
-      'Stops the simulator video recording started by record_video',
+      'Stops the open-ended video recording started by record_video and finalizes the file. '
+      + 'Not needed when record_video was called with duration_s.',
       {},
-      { title: 'Stop Recording', readOnlyHint: false, openWorldHint: true },
+      { title: 'Stop Recording', readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
       stopRecordingHandler,
     )
   }

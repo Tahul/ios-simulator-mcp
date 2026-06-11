@@ -5,17 +5,30 @@ import { isToolFiltered, udidSchema } from '../lib/constants'
 import { getBootedDeviceId } from '../lib/devices'
 import { errorResult, textResult } from '../lib/errors'
 import { idb } from '../lib/run'
+import { resolveTarget } from './snapshot'
 
 const durationSchema = z
   .string()
   .regex(/^\d+(?:\.\d+)?$/)
   .optional()
 
+const refSchema = z
+  .string()
+  .optional()
+  .describe('Element ref from the most recent ui_snapshot (e.g. "e12"). Taps the element\'s center.')
+
+const labelSchema = z
+  .string()
+  .optional()
+  .describe('Element label or accessibility identifier to target (exact match preferred, then substring, case-insensitive)')
+
 export interface UiTapParams {
   duration?: string
   udid?: string
-  x: number
-  y: number
+  x?: number
+  y?: number
+  ref?: string
+  label?: string
 }
 
 export async function uiDescribeAllHandler({ udid }: { udid?: string }): Promise<CallToolResult> {
@@ -38,34 +51,53 @@ export async function uiDescribeAllHandler({ udid }: { udid?: string }): Promise
   }
 }
 
-export async function uiTapHandler({ duration, udid, x, y }: UiTapParams): Promise<CallToolResult> {
+async function tap(udid: string, x: number, y: number, duration?: string): Promise<void> {
+  await idb(
+    'ui',
+    'tap',
+    '--udid',
+    udid,
+    ...(duration ? ['--duration', duration] : []),
+    '--json',
+    // `--` separates options from user-provided positional arguments so
+    // they cannot be misinterpreted as flags.
+    '--',
+    String(x),
+    String(y),
+  )
+}
+
+export async function uiTapHandler({ duration, udid, x, y, ref, label }: UiTapParams): Promise<CallToolResult> {
   try {
     const actualUdid = await getBootedDeviceId(udid)
+    const target = await resolveTarget(actualUdid, { x, y, ref, label })
 
-    await idb(
-      'ui',
-      'tap',
-      '--udid',
-      actualUdid,
-      ...(duration ? ['--duration', duration] : []),
-      '--json',
-      // `--` separates options from user-provided positional arguments so
-      // they cannot be misinterpreted as flags.
-      '--',
-      String(x),
-      String(y),
-    )
+    await tap(actualUdid, target.x, target.y, duration)
 
-    return textResult('Tapped successfully')
+    return textResult(`Tapped (${target.x}, ${target.y}) successfully`)
   }
   catch (error) {
     return errorResult('Error tapping on the screen', error)
   }
 }
 
-export async function uiTypeHandler({ udid, text }: { udid?: string, text: string }): Promise<CallToolResult> {
+export interface UiTypeParams {
+  udid?: string
+  text: string
+  ref?: string
+  label?: string
+}
+
+export async function uiTypeHandler({ udid, text, ref, label }: UiTypeParams): Promise<CallToolResult> {
   try {
     const actualUdid = await getBootedDeviceId(udid)
+
+    // When a target is given, tap it first so the field has focus.
+    if (ref || label) {
+      const target = await resolveTarget(actualUdid, { ref, label })
+      await tap(actualUdid, target.x, target.y)
+      await new Promise(resolve => setTimeout(resolve, 300))
+    }
 
     await idb(
       'ui',
@@ -145,7 +177,8 @@ export function registerUiTools(server: McpServer): void {
   if (!isToolFiltered('ui_describe_all')) {
     server.tool(
       'ui_describe_all',
-      'Describes accessibility information for the entire screen in the iOS Simulator',
+      'Dumps the raw accessibility tree for the entire screen as JSON. Output is large — prefer ui_snapshot for a '
+      + 'compact, ref-based view, or ui_find_element to search. Use this only when you need the full tree with frames.',
       { udid: udidSchema },
       { title: 'Describe All UI Elements', readOnlyHint: true, openWorldHint: true },
       uiDescribeAllHandler,
@@ -155,14 +188,18 @@ export function registerUiTools(server: McpServer): void {
   if (!isToolFiltered('ui_tap')) {
     server.tool(
       'ui_tap',
-      'Tap on the screen in the iOS Simulator',
+      'Taps the screen. Target by ref (from ui_snapshot), by label, or by x/y coordinates in points — provide exactly one. '
+      + 'Refs and labels are resolved to the element\'s center, which avoids retina-scaling mis-taps. '
+      + 'Verify the result with ui_snapshot or wait_for_element.',
       {
-        duration: durationSchema.describe('Press duration'),
+        duration: durationSchema.describe('Press duration in seconds (e.g. "1.5" for a long press)'),
         udid: udidSchema,
-        x: z.number().describe('The x-coordinate'),
-        y: z.number().describe('The y-coordinate'),
+        x: z.number().optional().describe('The x-coordinate in points (use with y)'),
+        y: z.number().optional().describe('The y-coordinate in points (use with x)'),
+        ref: refSchema,
+        label: labelSchema,
       },
-      { title: 'UI Tap', readOnlyHint: false, openWorldHint: true },
+      { title: 'UI Tap', readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
       uiTapHandler,
     )
   }
@@ -170,16 +207,19 @@ export function registerUiTools(server: McpServer): void {
   if (!isToolFiltered('ui_type')) {
     server.tool(
       'ui_type',
-      'Input text into the iOS Simulator',
+      'Types text into the iOS Simulator (ASCII only, max 500 chars). Requires a focused text field: pass ref or label '
+      + 'to tap the target field first, or tap it yourself with ui_tap beforehand.',
       {
         udid: udidSchema,
         text: z
           .string()
           .max(500)
           .regex(/^[\x20-\x7E]+$/)
-          .describe('Text to input'),
+          .describe('Text to input (printable ASCII only)'),
+        ref: refSchema,
+        label: labelSchema,
       },
-      { title: 'UI Type', readOnlyHint: false, openWorldHint: true },
+      { title: 'UI Type', readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
       uiTypeHandler,
     )
   }
@@ -187,7 +227,8 @@ export function registerUiTools(server: McpServer): void {
   if (!isToolFiltered('ui_swipe')) {
     server.tool(
       'ui_swipe',
-      'Swipe on the screen in the iOS Simulator',
+      'Swipes between two points on the screen (coordinates in points). Useful for scrolling, dismissing sheets, '
+      + 'and pull-to-refresh. For scrolling lists, swipe from the center of the list.',
       {
         duration: durationSchema.describe('Swipe duration in seconds (e.g., 0.1)'),
         udid: udidSchema,
@@ -201,7 +242,7 @@ export function registerUiTools(server: McpServer): void {
           .describe('The size of each step in the swipe (default is 1)')
           .default(1),
       },
-      { title: 'UI Swipe', readOnlyHint: false, openWorldHint: true },
+      { title: 'UI Swipe', readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
       uiSwipeHandler,
     )
   }
@@ -209,7 +250,7 @@ export function registerUiTools(server: McpServer): void {
   if (!isToolFiltered('ui_describe_point')) {
     server.tool(
       'ui_describe_point',
-      'Returns the accessibility element at given co-ordinates on the iOS Simulator\'s screen',
+      'Returns the accessibility element at the given point coordinates. Useful to verify what a tap at (x, y) would hit.',
       {
         udid: udidSchema,
         x: z.number().describe('The x-coordinate'),
