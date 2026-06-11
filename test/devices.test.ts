@@ -28,13 +28,13 @@ describe('parseBootedDevice', () => {
     expect(device.name).toBe('iPad Pro (12.9-inch) (6th generation)')
   })
 
-  it('throws when no device is booted', () => {
+  it('throws when no device is booted, listing available devices', () => {
     const noneBooted = JSON.stringify({
       devices: {
-        runtime: [{ udid: 'A', name: 'iPhone 15', state: 'Shutdown' }],
+        runtime: [{ udid: 'A', name: 'iPhone 15', state: 'Shutdown', isAvailable: true }],
       },
     })
-    expect(() => parseBootedDevice(noneBooted)).toThrow('No booted simulator found')
+    expect(() => parseBootedDevice(noneBooted)).toThrow(/No booted simulator found.*iPhone 15 \(A\)/)
   })
 
   it('throws when devices map is empty', () => {
