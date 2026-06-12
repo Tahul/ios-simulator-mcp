@@ -3,8 +3,9 @@ import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
 import { z } from 'zod'
 import { isToolFiltered, udidSchema } from '../lib/constants'
 import { getBootedDeviceId } from '../lib/devices'
-import { errorResult, textResult } from '../lib/errors'
-import { idb } from '../lib/run'
+import { errorResult, textResult, ToolError } from '../lib/errors'
+import { idbWithTimeout } from '../lib/run'
+import { captureCompressedScreenshot } from './screenshot'
 
 export interface ElementFrame {
   x: number
@@ -144,8 +145,13 @@ export function resetSnapshotState(): void {
   currentRefs = new Map()
 }
 
-async function describeAll(udid: string): Promise<RawElement[]> {
-  const { stdout } = await idb('ui', 'describe-all', '--udid', udid, '--json', '--nested')
+// A single accessibility dump should be quick; inside poll loops we cap it
+// tighter than the global exec timeout so one slow call can't blow the loop
+// budget. A wedged idb gets killed and the loop simply retries.
+const DESCRIBE_TIMEOUT_MS = 8000
+
+export async function describeAll(udid: string, timeoutMs = DESCRIBE_TIMEOUT_MS): Promise<RawElement[]> {
+  const { stdout } = await idbWithTimeout(timeoutMs, 'ui', 'describe-all', '--udid', udid, '--json', '--nested')
   return JSON.parse(stdout) as RawElement[]
 }
 
@@ -156,7 +162,7 @@ function elementMatchesLabel(element: RawElement, label: string): boolean {
   return axLabel === needle || axId === needle || !!axLabel?.includes(needle) || !!axId?.includes(needle)
 }
 
-function collectLabelMatches(elements: RawElement[], label: string): Array<RawElement & { frame: ElementFrame }> {
+export function collectLabelMatches(elements: RawElement[], label: string): Array<RawElement & { frame: ElementFrame }> {
   const matches: Array<RawElement & { frame: ElementFrame }> = []
   for (const element of elements) {
     if (hasVisibleFrame(element) && elementMatchesLabel(element, label))
@@ -165,6 +171,55 @@ function collectLabelMatches(elements: RawElement[], label: string): Array<RawEl
       matches.push(...collectLabelMatches(element.children, label))
   }
   return matches
+}
+
+/** True if any visible element matches the label (live tree). */
+export async function isElementPresent(udid: string, label: string): Promise<boolean> {
+  const tree = await describeAll(udid)
+  return collectLabelMatches(tree, label).length > 0
+}
+
+export interface Expectation {
+  appears?: string
+  gone?: string
+  timeoutMs?: number
+}
+
+export interface VerificationResult {
+  verified: boolean
+  detail: string
+}
+
+const VERIFY_POLL_MS = 400
+
+/**
+ * Polls the accessibility tree to confirm a post-action expectation:
+ * `appears` waits for a label to show up, `gone` waits for it to disappear.
+ * Returns a result instead of throwing so callers can fold it into a
+ * partial-success message (the action itself already happened).
+ */
+export async function verifyExpectation(udid: string, { appears, gone, timeoutMs = 4000 }: Expectation): Promise<VerificationResult | null> {
+  if (!appears && !gone)
+    return null
+
+  const start = Date.now()
+  while (true) {
+    try {
+      if (appears && await isElementPresent(udid, appears))
+        return { verified: true, detail: `"${appears}" appeared` }
+      if (gone && !(await isElementPresent(udid, gone)))
+        return { verified: true, detail: `"${gone}" is gone` }
+    }
+    catch {
+      // transient describe failure (e.g. mid-transition) — keep polling
+    }
+
+    if (Date.now() - start >= timeoutMs) {
+      const what = appears ? `"${appears}" did not appear` : `"${gone}" is still present`
+      return { verified: false, detail: `${what} within ${Math.round(timeoutMs / 1000)}s` }
+    }
+    await new Promise(resolve => setTimeout(resolve, VERIFY_POLL_MS))
+  }
 }
 
 export interface TargetParams {
@@ -186,8 +241,9 @@ export async function resolveTarget(udid: string, { x, y, ref, label }: TargetPa
   if (ref) {
     const entry = currentRefs.get(ref)
     if (!entry) {
-      throw new Error(
+      throw new ToolError(
         `Unknown or stale ref "${ref}". Refs are only valid for the most recent ui_snapshot — call ui_snapshot again.`,
+        'STALE_REF',
       )
     }
     return frameCenter(entry.frame)
@@ -197,8 +253,9 @@ export async function resolveTarget(udid: string, { x, y, ref, label }: TargetPa
     const tree = await describeAll(udid)
     const matches = collectLabelMatches(tree, label)
     if (matches.length === 0) {
-      throw new Error(
+      throw new ToolError(
         `No on-screen element matching "${label}". Call ui_snapshot to inspect the current screen.`,
+        'ELEMENT_NOT_FOUND',
       )
     }
     const exact = matches.find(m =>
@@ -208,27 +265,68 @@ export async function resolveTarget(udid: string, { x, y, ref, label }: TargetPa
     return frameCenter((exact ?? matches[0]!).frame)
   }
 
-  throw new Error('Provide either x/y coordinates, a ref from ui_snapshot, or a label.')
+  throw new ToolError('Provide either x/y coordinates, a ref from ui_snapshot, or a label.', 'INVALID_ARGUMENT')
+}
+
+interface SnapshotRender {
+  text: string
+  structured: Record<string, unknown>
+}
+
+/** Runs a snapshot, stores refs, and returns text + structured payloads. */
+async function takeSnapshot(udid: string, maxDepth?: number): Promise<SnapshotRender> {
+  const tree = await describeAll(udid)
+  const { entries, text } = buildSnapshot(tree, { maxDepth })
+
+  currentRefs = new Map(entries.map(entry => [entry.ref, entry]))
+
+  const screenFrame = tree[0] && hasVisibleFrame(tree[0]) ? tree[0].frame : null
+  const screen = screenFrame ? `Screen ${screenFrame.width}x${screenFrame.height} points. ` : ''
+
+  return {
+    text: `${screen}${entries.length} elements (coordinates are point centers; pass ref or label to ui_tap / ui_type):\n${text}`,
+    structured: {
+      screen: screenFrame ? { width: screenFrame.width, height: screenFrame.height } : null,
+      elements: entries.map(e => ({
+        ref: e.ref,
+        type: e.type,
+        label: e.label,
+        identifier: e.identifier,
+        center: frameCenter(e.frame),
+        frame: e.frame,
+      })),
+    },
+  }
 }
 
 export async function uiSnapshotHandler({ udid, max_depth }: { udid?: string, max_depth?: number }): Promise<CallToolResult> {
   try {
     const actualUdid = await getBootedDeviceId(udid)
-    const tree = await describeAll(actualUdid)
-    const { entries, text } = buildSnapshot(tree, { maxDepth: max_depth })
-
-    currentRefs = new Map(entries.map(entry => [entry.ref, entry]))
-
-    const screen = tree[0] && hasVisibleFrame(tree[0])
-      ? `Screen ${tree[0].frame.width}x${tree[0].frame.height} points. `
-      : ''
-
-    return textResult(
-      `${screen}${entries.length} elements (coordinates are point centers; pass ref or label to ui_tap / ui_type):\n${text}`,
-    )
+    const { text, structured } = await takeSnapshot(actualUdid, max_depth)
+    return textResult(text, structured)
   }
   catch (error) {
     return errorResult('Error taking UI snapshot', error)
+  }
+}
+
+export async function uiInspectHandler({ udid, max_depth }: { udid?: string, max_depth?: number }): Promise<CallToolResult> {
+  try {
+    const actualUdid = await getBootedDeviceId(udid)
+    const { text, structured } = await takeSnapshot(actualUdid, max_depth)
+    const base64 = await captureCompressedScreenshot(actualUdid)
+
+    return {
+      isError: false,
+      content: [
+        { type: 'image', data: base64, mimeType: 'image/jpeg' },
+        { type: 'text', text },
+      ],
+      structuredContent: structured,
+    }
+  }
+  catch (error) {
+    return errorResult('Error inspecting UI', error)
   }
 }
 
@@ -248,22 +346,28 @@ export async function waitForElementHandler({ udid, search, type, timeout }: Wai
     const start = Date.now()
 
     while (true) {
-      const tree = await describeAll(actualUdid)
-      const matches = collectLabelMatches(tree, search).filter(
-        m => type == null || m.type?.toLowerCase() === type.toLowerCase(),
-      )
-
-      const match = matches[0]
-      if (match) {
-        const center = frameCenter(match.frame)
-        const elapsed = ((Date.now() - start) / 1000).toFixed(1)
-        return textResult(
-          `Found ${match.type ?? 'element'} "${match.AXLabel ?? match.AXUniqueId ?? search}" at (${center.x}, ${center.y}) after ${elapsed}s`,
+      try {
+        const tree = await describeAll(actualUdid)
+        const matches = collectLabelMatches(tree, search).filter(
+          m => type == null || m.type?.toLowerCase() === type.toLowerCase(),
         )
+
+        const match = matches[0]
+        if (match) {
+          const center = frameCenter(match.frame)
+          const elapsed = ((Date.now() - start) / 1000).toFixed(1)
+          return textResult(
+            `Found ${match.type ?? 'element'} "${match.AXLabel ?? match.AXUniqueId ?? search}" at (${center.x}, ${center.y}) after ${elapsed}s`,
+            { found: true, center, type: match.type ?? null, label: match.AXLabel ?? match.AXUniqueId ?? null },
+          )
+        }
+      }
+      catch {
+        // transient describe failure — keep polling until the deadline
       }
 
       if (Date.now() - start >= timeoutMs)
-        throw new Error(`Element matching "${search}" did not appear within ${timeout ?? 10}s`)
+        throw new ToolError(`Element matching "${search}" did not appear within ${timeout ?? 10}s`, 'ELEMENT_NOT_FOUND')
 
       await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL_MS))
     }
@@ -297,6 +401,21 @@ export function registerSnapshotTools(server: McpServer): void {
       },
       { title: 'UI Snapshot', readOnlyHint: true, openWorldHint: true },
       uiSnapshotHandler,
+    )
+  }
+
+  if (!isToolFiltered('ui_inspect')) {
+    server.tool(
+      'ui_inspect',
+      'Returns the compact element snapshot (refs + coordinates) AND an inline screenshot of the current screen in '
+      + 'one call. Use this at the start of an act cycle when you want both the structure to target and the pixels to '
+      + 'reason about — it saves a round-trip versus calling ui_snapshot and ui_view separately.',
+      {
+        udid: udidSchema,
+        max_depth: z.number().int().min(1).max(100).optional().describe('Maximum tree depth to traverse (default 25)'),
+      },
+      { title: 'UI Inspect', readOnlyHint: true, openWorldHint: true },
+      uiInspectHandler,
     )
   }
 

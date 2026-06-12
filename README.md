@@ -42,6 +42,7 @@ claude mcp add ios-simulator -- bunx @yaelg/ios-simulator-mcp
 | Tool | Description |
 | --- | --- |
 | `ui_snapshot` | Compact list of visible interactive/labeled elements with refs (`e1`, `e2`, ...) and point coordinates |
+| `ui_inspect` | Snapshot + screenshot in one call (refs and pixels together) |
 | `ui_view` | Compressed screenshot returned inline as JPEG, downscaled to point resolution |
 | `ui_describe_all` | Raw accessibility tree as JSON (verbose — prefer `ui_snapshot`) |
 | `ui_describe_point` | Accessibility element at given coordinates |
@@ -52,7 +53,7 @@ claude mcp add ios-simulator -- bunx @yaelg/ios-simulator-mcp
 
 | Tool | Description |
 | --- | --- |
-| `ui_tap` | Tap by `ref`, `label`, or x/y coordinates |
+| `ui_tap` | Tap by `ref`, `label`, or x/y coordinates; `expect_appears`/`expect_gone` verify the result |
 | `ui_type` | Input text; pass `ref`/`label` to focus the field first |
 | `ui_swipe` | Swipe gesture |
 | `open_url` | Open https://, deep links, or exp:// dev-client URLs |
@@ -66,6 +67,7 @@ claude mcp add ios-simulator -- bunx @yaelg/ios-simulator-mcp
 | `launch_app` | Launch by bundle identifier, returns the PID (EX_UPDATES_* env rejected) |
 | `terminate_app` | Terminate a running app |
 | `uninstall_app` | Uninstall an app and its data |
+| `reset_app` | Reset an app to a fresh-install state (terminate, privacy reset, uninstall, optional reinstall) |
 | `list_apps` | List installed apps with bundle id, name, and type |
 | `app_logs` | Recent console logs (JS errors, crashes) filtered by process |
 
@@ -73,8 +75,10 @@ claude mcp add ios-simulator -- bunx @yaelg/ios-simulator-mcp
 
 | Tool | Description |
 | --- | --- |
+| `doctor` | Preflight: checks Xcode, idb, simulators, and Metro, and reports how to fix gaps |
 | `get_booted_sim_id` | Get the booted simulator's UDID (rarely needed — see below) |
 | `boot_sim` | Boot a simulator by udid/name and wait until it is actually ready |
+| `select_default_device` | Pin a session default simulator so tools don't need `udid` |
 | `open_simulator` | Open the iOS Simulator application |
 | `set_permissions` | Grant/revoke/reset privacy permissions (camera, location, ...) |
 | `push_notification` | Deliver a simulated APNs push |
@@ -91,7 +95,14 @@ claude mcp add ios-simulator -- bunx @yaelg/ios-simulator-mcp
 | `record_video` | Record video; pass `duration_s` for a self-stopping clip |
 | `stop_recording` | Stop an open-ended recording |
 
-All tools accept an optional `udid`; when omitted, the currently booted simulator is used. The server also ships usage instructions via the MCP `initialize` response (including Expo/Metro guidance), which compatible hosts surface to the agent automatically.
+All tools accept an optional `udid`; when omitted, the session default (`select_default_device`) or the currently booted simulator is used. The server also ships usage instructions via the MCP `initialize` response (including Expo/Metro guidance), which compatible hosts surface to the agent automatically.
+
+### Built for agents
+
+- **Verify in the same call.** `ui_tap` / `ui_type` / `ui_swipe` take `expect_appears` / `expect_gone` to confirm the screen changed, collapsing the act→snapshot→compare loop into one call.
+- **Structured output.** `ui_snapshot`, `ui_inspect`, `list_apps`, `app_logs`, `doctor`, and `get_booted_sim_id` return typed `structuredContent` alongside text, so follow-up calls don't re-parse prose.
+- **Machine-readable errors.** Failures carry a `[CODE]` (e.g. `NO_BOOTED_SIM`, `METRO_UNREACHABLE`, `ELEMENT_NOT_FOUND`) and a recovery hint in `structuredContent.error`, so an agent self-routes in one turn.
+- **Preflight with `doctor`** before a session to catch a missing `idb`, no booted device, or a down Metro.
 
 ### Launching Expo apps
 

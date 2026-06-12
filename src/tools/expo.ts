@@ -11,6 +11,7 @@ import {
   withDisableOnboarding,
 } from '../lib/metro'
 import { run } from '../lib/run'
+import { describeAll } from './snapshot'
 
 export interface ExpoLaunchParams {
   udid?: string
@@ -22,10 +23,80 @@ export interface ExpoLaunchParams {
   metro_timeout_s?: number
   clean?: boolean
   bundle_id?: string
+  verify?: boolean
+  verify_timeout_s?: number
 }
 
 const DEFAULT_METRO_URL = 'http://localhost:8081'
 const EXPO_GO_BUNDLE_ID = 'host.exp.Exponent'
+
+interface RawAxElement {
+  AXLabel?: string | null
+  type?: string
+  children?: RawAxElement[]
+}
+
+function flatten(elements: RawAxElement[], out: RawAxElement[] = []): RawAxElement[] {
+  for (const el of elements) {
+    out.push(el)
+    if (el.children)
+      flatten(el.children, out)
+  }
+  return out
+}
+
+export type LaunchOutcome = 'loaded' | 'redbox' | 'unconfirmed'
+
+export interface LaunchVerification {
+  outcome: LaunchOutcome
+  detail: string
+}
+
+const VERIFY_POLL_MS = 750
+
+/**
+ * After opening the deep link, polls the accessibility tree to decide whether
+ * the JS bundle actually rendered (many labeled elements), surfaced a RedBox
+ * error overlay, or never confirmed within the timeout. Best-effort — returns
+ * an outcome rather than throwing, since the link was already opened.
+ */
+export async function verifyAppLoaded(udid: string, timeoutMs: number): Promise<LaunchVerification> {
+  const start = Date.now()
+  let lastCount = 0
+
+  while (true) {
+    try {
+      const tree = await describeAll(udid)
+      const flat = flatten(tree)
+      const labels = flat
+        .map(e => e.AXLabel?.trim())
+        .filter((l): l is string => !!l)
+
+      const redbox = labels.find(l =>
+        /redbox/i.test(l)
+        || /console was not able to connect/i.test(l)
+        || /unable to (?:load|resolve|connect)/i.test(l)
+        || (/^(?:error|warning):/i.test(l) && labels.some(x => /reload|dismiss/i.test(x))),
+      )
+      if (redbox)
+        return { outcome: 'redbox', detail: `error overlay detected: "${redbox.slice(0, 120)}"` }
+
+      lastCount = labels.length
+      // A loaded RN screen exposes many labeled nodes; an unconnected dev
+      // client / blank splash exposes very few.
+      if (labels.length >= 5)
+        return { outcome: 'loaded', detail: `${labels.length} labeled elements rendered` }
+    }
+    catch {
+      // tree not describable yet — keep polling
+    }
+
+    if (Date.now() - start >= timeoutMs)
+      return { outcome: 'unconfirmed', detail: `only ${lastCount} labeled elements after ${Math.round(timeoutMs / 1000)}s; check app_logs` }
+
+    await new Promise(resolve => setTimeout(resolve, VERIFY_POLL_MS))
+  }
+}
 
 /**
  * Resolves which app to terminate for a cold start. Expo Go has a fixed
@@ -65,6 +136,8 @@ export async function expoLaunchHandler({
   metro_timeout_s = 30,
   clean = true,
   bundle_id,
+  verify = true,
+  verify_timeout_s = 20,
 }: ExpoLaunchParams): Promise<CallToolResult> {
   const steps: string[] = []
   try {
@@ -119,11 +192,35 @@ export async function expoLaunchHandler({
     await run('xcrun', ['simctl', 'openurl', device.udid, '--', finalUrl])
     steps.push('opened deep link')
 
+    // 5. Verify the app actually rendered (not just that the link opened)
+    let verification = null
+    if (verify) {
+      verification = await verifyAppLoaded(device.udid, verify_timeout_s * 1000)
+      steps.push(`verify: ${verification.outcome}`)
+    }
+
+    const headline = verification?.outcome === 'redbox'
+      ? `Expo launch opened but the app shows an error on ${device.name}.`
+      : verification?.outcome === 'unconfirmed'
+        ? `Expo launch opened on ${device.name} but could not confirm the app loaded.`
+        : `Expo launch succeeded on ${device.name} (${device.udid}).`
+
+    const reportLines = [
+      headline,
+      `Deep link: ${finalUrl}`,
+      `Steps: ${steps.join(' -> ')}`,
+      ...(verification ? [`Verification: ${verification.detail}`] : []),
+      'If the app misbehaves, check app_logs (process is your app/Expo Go) for details.',
+    ]
+
     return textResult(
-      `Expo launch succeeded on ${device.name} (${device.udid}).\n`
-      + `Deep link: ${finalUrl}\n`
-      + `Steps: ${steps.join(' -> ')}\n`
-      + `If the app does not appear, check app_logs (process is your app/Expo Go) for a Metro connection error.`,
+      reportLines.join('\n'),
+      {
+        udid: device.udid,
+        deepLink: finalUrl,
+        runtime: link.runtime,
+        outcome: verification?.outcome ?? 'opened',
+      },
     )
   }
   catch (error) {
@@ -174,6 +271,16 @@ export function registerExpoTools(server: McpServer): void {
         .max(256)
         .optional()
         .describe('Host app bundle id to terminate for a clean start (defaults to Expo Go; required to clean-start a dev client)'),
+      verify: z
+        .boolean()
+        .optional()
+        .describe('After opening, poll the screen to confirm the app loaded vs showing a RedBox error (default true)'),
+      verify_timeout_s: z
+        .number()
+        .min(1)
+        .max(120)
+        .optional()
+        .describe('Seconds to wait for the app to render before reporting unconfirmed (default 20)'),
     },
     { title: 'Expo Launch', readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
     expoLaunchHandler,

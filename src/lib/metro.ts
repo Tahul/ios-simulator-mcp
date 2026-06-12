@@ -6,6 +6,8 @@
  * @see https://docs.expo.dev/more/expo-cli/#open-endpoint
  */
 
+import { ToolError } from './errors'
+
 export interface OpenEndpointResponse {
   runtime?: 'expo' | 'custom' | 'web'
   url?: string
@@ -69,7 +71,7 @@ export async function waitForMetro(
     catch {
       probe.cancel()
       if (Date.now() - start >= timeoutMs)
-        throw new Error(`Metro dev server at ${base} is not responding after ${Math.round(timeoutMs / 1000)}s. Start it with \`npx expo start\` (optionally --dev-client).`)
+        throw new ToolError(`Metro dev server at ${base} is not responding after ${Math.round(timeoutMs / 1000)}s. Start it with \`npx expo start\` (optionally --dev-client).`, 'METRO_UNREACHABLE')
       await new Promise(resolve => setTimeout(resolve, intervalMs))
     }
   }

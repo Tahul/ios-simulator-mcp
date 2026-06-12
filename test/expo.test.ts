@@ -9,6 +9,27 @@ const BOOTED = JSON.stringify({
   },
 })
 
+// A loaded RN screen: many labeled elements.
+const LOADED_TREE = JSON.stringify([{
+  type: 'Application',
+  frame: { x: 0, y: 0, width: 393, height: 852 },
+  children: Array.from({ length: 8 }, (_, i) => ({
+    type: 'StaticText',
+    AXLabel: `Item ${i}`,
+    frame: { x: 0, y: i * 30, width: 100, height: 20 },
+  })),
+}])
+
+const REDBOX_TREE = JSON.stringify([{
+  type: 'Application',
+  frame: { x: 0, y: 0, width: 393, height: 852 },
+  children: [
+    { type: 'StaticText', AXLabel: 'Unable to load script. Make sure Metro is running', frame: { x: 0, y: 0, width: 300, height: 40 } },
+    { type: 'Button', AXLabel: 'Reload', frame: { x: 0, y: 50, width: 80, height: 30 } },
+    { type: 'Button', AXLabel: 'Dismiss', frame: { x: 90, y: 50, width: 80, height: 30 } },
+  ],
+}])
+
 interface RecordedCall {
   cmd: string
   args: string[]
@@ -27,12 +48,14 @@ afterEach(() => {
 })
 
 describe('expo_launch', () => {
-  it('boots, waits for Metro, resolves the deep link, and opens it', async () => {
+  it('boots, waits for Metro, resolves the deep link, opens it, and verifies load', async () => {
     const calls: RecordedCall[] = []
     setRunner((cmd, args): Promise<RunResult> => {
       calls.push({ cmd, args })
       if (args.includes('list'))
         return Promise.resolve({ stdout: BOOTED, stderr: '' })
+      if (args.includes('describe-all'))
+        return Promise.resolve({ stdout: LOADED_TREE, stderr: '' })
       return Promise.resolve({ stdout: '', stderr: '' })
     })
 
@@ -54,10 +77,36 @@ describe('expo_launch', () => {
     const out = text(result)
     expect(out).toContain('Expo launch succeeded')
     expect(out).toContain('resolved custom link via metro-open-endpoint')
+    expect(out).toContain('verify: loaded')
+    expect((result.structuredContent as { outcome: string }).outcome).toBe('loaded')
 
     const openCall = calls.find(c => c.args.includes('openurl'))
     expect(openCall).toBeDefined()
     expect(openCall?.args.at(-1)).toContain('disableOnboarding=1')
+  })
+
+  it('reports a RedBox error overlay as the outcome', async () => {
+    setRunner((_cmd, args) => {
+      if (args.includes('list'))
+        return Promise.resolve({ stdout: BOOTED, stderr: '' })
+      if (args.includes('describe-all'))
+        return Promise.resolve({ stdout: REDBOX_TREE, stderr: '' })
+      return Promise.resolve({ stdout: '', stderr: '' })
+    })
+
+    globalThis.fetch = mock(async (url: string | URL) => {
+      const u = url.toString()
+      if (u.includes('/_expo/open'))
+        return { ok: true, json: async () => ({ url: 'exp://localhost:8081', runtime: 'expo' }) } as Response
+      return { ok: true } as Response
+    }) as unknown as typeof fetch
+
+    const result = await expoLaunchHandler({ udid: 'AAA', runtime: 'expo', verify_timeout_s: 2 })
+
+    expect(result.isError).toBe(false)
+    const out = text(result)
+    expect(out).toContain('shows an error')
+    expect((result.structuredContent as { outcome: string }).outcome).toBe('redbox')
   })
 
   it('cold-starts Expo Go by terminating it before opening', async () => {
@@ -76,7 +125,7 @@ describe('expo_launch', () => {
       return { ok: true } as Response
     }) as unknown as typeof fetch
 
-    const result = await expoLaunchHandler({ udid: 'AAA', runtime: 'expo' })
+    const result = await expoLaunchHandler({ udid: 'AAA', runtime: 'expo', verify: false })
 
     expect(result.isError).toBe(false)
     const terminateIdx = calls.findIndex(c => c.args.includes('terminate') && c.args.includes('host.exp.Exponent'))
@@ -102,7 +151,7 @@ describe('expo_launch', () => {
       return { ok: true } as Response
     }) as unknown as typeof fetch
 
-    const result = await expoLaunchHandler({ udid: 'AAA', bundle_id: 'com.tahul.spotter' })
+    const result = await expoLaunchHandler({ udid: 'AAA', bundle_id: 'com.tahul.spotter', verify: false })
 
     expect(result.isError).toBe(false)
     expect(calls.some(c => c.args.includes('terminate') && c.args.includes('com.tahul.spotter'))).toBe(true)
@@ -124,7 +173,7 @@ describe('expo_launch', () => {
       return { ok: true } as Response
     }) as unknown as typeof fetch
 
-    await expoLaunchHandler({ udid: 'AAA', runtime: 'expo', clean: false })
+    await expoLaunchHandler({ udid: 'AAA', runtime: 'expo', clean: false, verify: false })
 
     expect(calls.some(c => c.args.includes('terminate'))).toBe(false)
   })
@@ -167,6 +216,7 @@ describe('expo_launch', () => {
       wait_for_metro: false,
       runtime: 'custom',
       scheme: 'exp+spotter',
+      verify: false,
     })
 
     expect(result.isError).toBe(false)

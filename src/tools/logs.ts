@@ -59,7 +59,11 @@ export async function appLogsHandler({ udid, process, predicate, since_s, max_li
       ? `(showing last ${shown.length} of ${lines.length} lines — narrow with process/predicate or raise max_lines)\n`
       : ''
 
-    return textResult(header + shown.join('\n'))
+    return textResult(header + shown.join('\n'), {
+      lines: shown,
+      totalLines: lines.length,
+      truncated: lines.length > shown.length,
+    })
   }
   catch (error) {
     return errorResult(

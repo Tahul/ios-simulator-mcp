@@ -195,6 +195,59 @@ export async function uninstallAppHandler({ udid, bundle_id }: { udid?: string, 
   }
 }
 
+export interface ResetAppParams {
+  udid?: string
+  bundle_id: string
+  app_path?: string
+}
+
+/**
+ * Returns an app to a fresh-install state: terminate, reset its privacy
+ * permissions, then uninstall. If app_path is provided, reinstalls a clean
+ * copy so the app is ready to launch again.
+ */
+export async function resetAppHandler({ udid, bundle_id, app_path }: ResetAppParams): Promise<CallToolResult> {
+  const steps: string[] = []
+  try {
+    const actualUdid = await getBootedDeviceId(udid)
+
+    // best-effort terminate (ignore if not running)
+    try {
+      await run('xcrun', ['simctl', 'terminate', actualUdid, bundle_id])
+      steps.push('terminated')
+    }
+    catch {
+      steps.push('not running')
+    }
+
+    // reset privacy grants for this app (ignore if unsupported)
+    try {
+      await run('xcrun', ['simctl', 'privacy', actualUdid, 'reset', 'all', bundle_id])
+      steps.push('privacy reset')
+    }
+    catch {
+      steps.push('privacy reset skipped')
+    }
+
+    // uninstall removes the data container
+    await run('xcrun', ['simctl', 'uninstall', actualUdid, bundle_id])
+    steps.push('uninstalled')
+
+    if (app_path) {
+      const absolutePath = path.isAbsolute(app_path) ? app_path : path.resolve(app_path)
+      if (!fs.existsSync(absolutePath))
+        throw new Error(`App bundle not found at: ${absolutePath}`)
+      await run('xcrun', ['simctl', 'install', actualUdid, absolutePath])
+      steps.push(`reinstalled from ${absolutePath}`)
+    }
+
+    return textResult(`Reset ${bundle_id} to a clean state: ${steps.join(' -> ')}.`)
+  }
+  catch (error) {
+    return errorResult(`Error resetting app (completed: ${steps.join(' -> ') || 'none'})`, error)
+  }
+}
+
 export async function listAppsHandler({ udid }: { udid?: string }): Promise<CallToolResult> {
   try {
     const actualUdid = await getBootedDeviceId(udid)
@@ -207,7 +260,7 @@ export async function listAppsHandler({ udid }: { udid?: string }): Promise<Call
     const lines = apps.map(app =>
       `${app.bundleId}${app.name ? ` — ${app.name}` : ''}${app.type ? ` (${app.type})` : ''}`,
     )
-    return textResult(lines.join('\n'))
+    return textResult(lines.join('\n'), { apps })
   }
   catch (error) {
     return errorResult('Error listing apps', error)
@@ -281,6 +334,26 @@ export function registerAppTools(server: McpServer): void {
       },
       { title: 'Uninstall App', readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
       uninstallAppHandler,
+    )
+  }
+
+  if (!isToolFiltered('reset_app')) {
+    server.tool(
+      'reset_app',
+      'Resets an app to a fresh-install state: terminates it, resets its privacy permissions, and uninstalls it '
+      + '(removing all data). Pass app_path to reinstall a clean copy in the same call so it is ready to launch. '
+      + 'Use this to guarantee a clean slate for a test run.',
+      {
+        udid: udidSchema,
+        bundle_id: bundleIdSchema,
+        app_path: z
+          .string()
+          .max(1024)
+          .optional()
+          .describe('Optional .app/.ipa path to reinstall after wiping, so the app is ready to launch again'),
+      },
+      { title: 'Reset App', readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
+      resetAppHandler,
     )
   }
 

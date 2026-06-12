@@ -5,7 +5,23 @@ import { isToolFiltered, udidSchema } from '../lib/constants'
 import { getBootedDeviceId } from '../lib/devices'
 import { errorResult, textResult } from '../lib/errors'
 import { idb } from '../lib/run'
-import { resolveTarget } from './snapshot'
+import { resolveTarget, verifyExpectation } from './snapshot'
+
+const expectAppearsSchema = z
+  .string()
+  .optional()
+  .describe('After the action, wait briefly and confirm an element with this label/identifier appears. Reports changed/no-change.')
+
+const expectGoneSchema = z
+  .string()
+  .optional()
+  .describe('After the action, wait briefly and confirm an element with this label/identifier disappears.')
+
+function expectationSuffix(result: Awaited<ReturnType<typeof verifyExpectation>>): string {
+  if (!result)
+    return ''
+  return result.verified ? ` Verified: ${result.detail}.` : ` Warning: ${result.detail} (action was still sent).`
+}
 
 const durationSchema = z
   .string()
@@ -29,6 +45,8 @@ export interface UiTapParams {
   y?: number
   ref?: string
   label?: string
+  expect_appears?: string
+  expect_gone?: string
 }
 
 export async function uiDescribeAllHandler({ udid }: { udid?: string }): Promise<CallToolResult> {
@@ -67,14 +85,18 @@ async function tap(udid: string, x: number, y: number, duration?: string): Promi
   )
 }
 
-export async function uiTapHandler({ duration, udid, x, y, ref, label }: UiTapParams): Promise<CallToolResult> {
+export async function uiTapHandler({ duration, udid, x, y, ref, label, expect_appears, expect_gone }: UiTapParams): Promise<CallToolResult> {
   try {
     const actualUdid = await getBootedDeviceId(udid)
     const target = await resolveTarget(actualUdid, { x, y, ref, label })
 
     await tap(actualUdid, target.x, target.y, duration)
 
-    return textResult(`Tapped (${target.x}, ${target.y}) successfully`)
+    const verification = await verifyExpectation(actualUdid, { appears: expect_appears, gone: expect_gone })
+    return textResult(
+      `Tapped (${target.x}, ${target.y}) successfully.${expectationSuffix(verification)}`,
+      verification ? { verification } : undefined,
+    )
   }
   catch (error) {
     return errorResult('Error tapping on the screen', error)
@@ -86,9 +108,11 @@ export interface UiTypeParams {
   text: string
   ref?: string
   label?: string
+  expect_appears?: string
+  expect_gone?: string
 }
 
-export async function uiTypeHandler({ udid, text, ref, label }: UiTypeParams): Promise<CallToolResult> {
+export async function uiTypeHandler({ udid, text, ref, label, expect_appears, expect_gone }: UiTypeParams): Promise<CallToolResult> {
   try {
     const actualUdid = await getBootedDeviceId(udid)
 
@@ -108,7 +132,11 @@ export async function uiTypeHandler({ udid, text, ref, label }: UiTypeParams): P
       text,
     )
 
-    return textResult('Typed successfully')
+    const verification = await verifyExpectation(actualUdid, { appears: expect_appears, gone: expect_gone })
+    return textResult(
+      `Typed successfully.${expectationSuffix(verification)}`,
+      verification ? { verification } : undefined,
+    )
   }
   catch (error) {
     return errorResult('Error typing text into the iOS Simulator', error)
@@ -123,9 +151,11 @@ export interface UiSwipeParams {
   x_end: number
   y_end: number
   delta?: number
+  expect_appears?: string
+  expect_gone?: string
 }
 
-export async function uiSwipeHandler({ duration, udid, x_start, y_start, x_end, y_end, delta }: UiSwipeParams): Promise<CallToolResult> {
+export async function uiSwipeHandler({ duration, udid, x_start, y_start, x_end, y_end, delta, expect_appears, expect_gone }: UiSwipeParams): Promise<CallToolResult> {
   try {
     const actualUdid = await getBootedDeviceId(udid)
 
@@ -144,7 +174,11 @@ export async function uiSwipeHandler({ duration, udid, x_start, y_start, x_end, 
       String(y_end),
     )
 
-    return textResult('Swiped successfully')
+    const verification = await verifyExpectation(actualUdid, { appears: expect_appears, gone: expect_gone })
+    return textResult(
+      `Swiped successfully.${expectationSuffix(verification)}`,
+      verification ? { verification } : undefined,
+    )
   }
   catch (error) {
     return errorResult('Error swiping on the screen', error)
@@ -198,6 +232,8 @@ export function registerUiTools(server: McpServer): void {
         y: z.number().optional().describe('The y-coordinate in points (use with x)'),
         ref: refSchema,
         label: labelSchema,
+        expect_appears: expectAppearsSchema,
+        expect_gone: expectGoneSchema,
       },
       { title: 'UI Tap', readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
       uiTapHandler,
@@ -218,6 +254,8 @@ export function registerUiTools(server: McpServer): void {
           .describe('Text to input (printable ASCII only)'),
         ref: refSchema,
         label: labelSchema,
+        expect_appears: expectAppearsSchema,
+        expect_gone: expectGoneSchema,
       },
       { title: 'UI Type', readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
       uiTypeHandler,
@@ -241,6 +279,8 @@ export function registerUiTools(server: McpServer): void {
           .optional()
           .describe('The size of each step in the swipe (default is 1)')
           .default(1),
+        expect_appears: expectAppearsSchema,
+        expect_gone: expectGoneSchema,
       },
       { title: 'UI Swipe', readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
       uiSwipeHandler,

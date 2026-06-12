@@ -14,7 +14,7 @@ import { idb, run } from '../lib/run'
  * dimensions, and compresses it to JPEG. Cuts vision-token cost ~10x with
  * no practical loss for UI inspection.
  */
-async function captureCompressedScreenshot(udid: string): Promise<string> {
+export async function captureCompressedScreenshot(udid: string): Promise<string> {
   // Get screen dimensions in points from the accessibility tree
   const { stdout: uiDescribeOutput } = await idb(
     'ui',

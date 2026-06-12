@@ -1,3 +1,4 @@
+import { ToolError } from './errors'
 import { run } from './run'
 
 export interface BootedDevice {
@@ -49,9 +50,9 @@ export function parseBootedDevice(json: string): BootedDevice {
   // guessing UDIDs. Note: a window showing a physical iPhone (iPhone
   // Mirroring) is not a simulator and cannot be targeted.
   const suggestion = available.length > 0
-    ? ` Available simulators (all shutdown): ${available.slice(0, 5).join(', ')}${available.length > 5 ? ', …' : ''}. Boot one with open_simulator, or \`xcrun simctl boot <udid>\` for a specific device.`
+    ? ` Available simulators (all shutdown): ${available.slice(0, 5).join(', ')}${available.length > 5 ? ', …' : ''}. Boot one with boot_sim, or \`xcrun simctl boot <udid>\` for a specific device.`
     : ''
-  throw new Error(`No booted simulator found.${suggestion}`)
+  throw new ToolError(`No booted simulator found.${suggestion}`, 'NO_BOOTED_SIM')
 }
 
 export async function getBootedDevice(): Promise<BootedDevice> {
@@ -59,10 +60,28 @@ export async function getBootedDevice(): Promise<BootedDevice> {
   return parseBootedDevice(stdout)
 }
 
-/** Returns the provided device id, or falls back to the currently booted simulator. */
+// Session-sticky default device, set via select_default_device. Lets agents
+// target a specific simulator once instead of passing udid on every call.
+let defaultDeviceId: string | null = null
+
+export function setDefaultDevice(udid: string | null): void {
+  defaultDeviceId = udid
+}
+
+export function getDefaultDevice(): string | null {
+  return defaultDeviceId
+}
+
+/**
+ * Resolves the target udid: explicit argument > session default > currently
+ * booted simulator.
+ */
 export async function getBootedDeviceId(deviceId?: string): Promise<string> {
   if (deviceId)
     return deviceId
+
+  if (defaultDeviceId)
+    return defaultDeviceId
 
   const { id } = await getBootedDevice()
   return id
@@ -109,7 +128,7 @@ export function resolveTargetDevice(
   if (selector?.udid) {
     const match = devices.find(d => d.udid === selector.udid)
     if (!match)
-      throw new Error(`No simulator with udid ${selector.udid}.${listSuggestion(available)}`)
+      throw new ToolError(`No simulator with udid ${selector.udid}.${listSuggestion(available)}`, 'DEVICE_NOT_FOUND')
     return match
   }
 
@@ -122,7 +141,7 @@ export function resolveTargetDevice(
         ?? matches.find(d => d.name.toLowerCase() === needle)
         ?? matches[0]
     if (!chosen)
-      throw new Error(`No available simulator matching "${selector.name}".${listSuggestion(available)}`)
+      throw new ToolError(`No available simulator matching "${selector.name}".${listSuggestion(available)}`, 'DEVICE_NOT_FOUND')
     return chosen
   }
 
@@ -180,13 +199,20 @@ export async function ensureBooted(
   }
 
   const start = Date.now()
+  let lastState = target.state
   while (true) {
-    const device = resolveTargetDevice(await listDevices(), { udid: target.udid })
-    if (device.state === 'Booted')
-      return { device, alreadyBooted: false }
+    try {
+      const device = resolveTargetDevice(await listDevices(), { udid: target.udid })
+      lastState = device.state
+      if (device.state === 'Booted')
+        return { device, alreadyBooted: false }
+    }
+    catch {
+      // transient list failure — keep polling until the deadline
+    }
 
     if (Date.now() - start >= timeoutMs)
-      throw new Error(`Simulator "${target.name}" did not reach Booted state within ${Math.round(timeoutMs / 1000)}s (current: ${device.state}).`)
+      throw new ToolError(`Simulator "${target.name}" did not reach Booted state within ${Math.round(timeoutMs / 1000)}s (current: ${lastState}).`, 'COMMAND_TIMEOUT')
 
     await new Promise(resolve => setTimeout(resolve, BOOT_POLL_INTERVAL_MS))
   }

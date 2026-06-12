@@ -108,10 +108,24 @@ export interface RecordVideoParams {
   duration_s?: number
 }
 
-/** Sends SIGINT and waits for the process to exit (bounded by STOP_TIMEOUT_MS). */
+/**
+ * Sends SIGINT (lets simctl finalize the video) and waits for exit, bounded
+ * by STOP_TIMEOUT_MS. If the process is still alive at the deadline it is
+ * SIGKILLed so we never leave an orphaned recorder behind.
+ */
 async function stopProcess(proc: RecordingProcess): Promise<void> {
   const exited = new Promise<void>((resolve) => {
-    const timer = setTimeout(resolve, STOP_TIMEOUT_MS)
+    const timer = setTimeout(() => {
+      if (proc.exitCode === null) {
+        try {
+          proc.kill('SIGKILL')
+        }
+        catch {
+          // already gone
+        }
+      }
+      resolve()
+    }, STOP_TIMEOUT_MS)
     proc.once('exit', () => {
       clearTimeout(timer)
       resolve()
