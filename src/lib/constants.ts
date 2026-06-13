@@ -12,7 +12,10 @@ export const udidSchema = z
   .string()
   .regex(UDID_REGEX)
   .optional()
-  .describe('Udid of target, can also be set with the IDB_UDID env var')
+  .describe(
+    'Target simulator UDID. Omit to use the currently booted simulator (or the one set via select_default_device). '
+    + 'Only pass this when several simulators are booted and you must disambiguate.',
+  )
 
 /** Checks the IOS_SIMULATOR_MCP_FILTERED_TOOLS env var for a tool name. */
 export function isToolFiltered(toolName: string): boolean {

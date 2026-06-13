@@ -24,8 +24,9 @@ Workflow:
 - If anything is misbehaving or at session start, call doctor — it reports Xcode/idb/simulator/Metro health and how to fix gaps.
 - Every tool accepts an optional \`udid\` and defaults to the currently booted simulator — do not call get_booted_sim_id first. To pin a device for the session, call select_default_device once.
 - See the screen with ui_snapshot (compact, ref-based) or ui_inspect (snapshot + screenshot in one call). Prefer these over ui_describe_all.
-- Act by passing \`ref\` (from the latest ui_snapshot) or \`label\` to ui_tap / ui_type instead of raw coordinates. Pass expect_appears / expect_gone to confirm the action took effect in the same call.
-- After navigation or launches, use wait_for_element instead of sleeping and re-describing.
+- Act by passing \`label\` (preferred) or \`ref\` to ui_tap / ui_type instead of raw coordinates. Refs are renumbered by every ui_snapshot, so a reused ref can hit a different element — re-snapshot before reusing one, or target by label.
+- Confirm actions in the same call with expect_appears / expect_gone. Otherwise a tap that changes nothing returns a "screen did not change" warning — when you see it (or a ref-reuse warning), re-snapshot and retarget; do NOT repeat the same tap. Use ui_describe_point to check what is actually at a coordinate.
+- After an async load (launch, network-driven navigation), use wait_for_element instead of sleeping and re-describing.
 - Debug with app_logs (JS errors, RedBox, native crashes) — do not rely on screenshots alone.
 - Find bundle identifiers with list_apps; reset an app to a clean state with reset_app.
 - Errors include a machine-readable [CODE] and a recovery hint — branch on it (e.g. NO_BOOTED_SIM -> boot_sim, METRO_UNREACHABLE -> start Metro).

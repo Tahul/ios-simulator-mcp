@@ -139,10 +139,15 @@ export function frameCenter(frame: ElementFrame): { x: number, y: number } {
 
 // Refs from the most recent ui_snapshot. Invalidated by the next snapshot.
 let currentRefs = new Map<string, SnapshotEntry>()
+// Tracks how many times a given ref has been resolved within one refs
+// generation. Repeatedly tapping the same ref without an intervening
+// ui_snapshot is the classic renumbering-trap loop, so we flag it.
+let refResolveCounts = new Map<string, number>()
 
 /** Test seam: clear stored snapshot refs. */
 export function resetSnapshotState(): void {
   currentRefs = new Map()
+  refResolveCounts = new Map()
 }
 
 // A single accessibility dump should be quick; inside poll loops we cap it
@@ -177,6 +182,37 @@ export function collectLabelMatches(elements: RawElement[], label: string): Arra
 export async function isElementPresent(udid: string, label: string): Promise<boolean> {
   const tree = await describeAll(udid)
   return collectLabelMatches(tree, label).length > 0
+}
+
+/**
+ * Cheap structural fingerprint of the visible tree (types + labels + frames),
+ * used to detect taps that changed nothing on screen. Order-sensitive on
+ * purpose: a reordered list is a real change.
+ */
+export function fingerprintTree(elements: RawElement[]): string {
+  const parts: string[] = []
+  function visit(nodes: RawElement[]): void {
+    for (const node of nodes) {
+      if (hasVisibleFrame(node)) {
+        const f = node.frame
+        parts.push(`${node.type ?? '?'}|${node.AXLabel ?? ''}|${node.AXUniqueId ?? ''}|${f.x},${f.y},${f.width},${f.height}`)
+      }
+      if (node.children)
+        visit(node.children)
+    }
+  }
+  visit(elements)
+  return parts.join('\n')
+}
+
+/** Fingerprints the current live screen; null if it can't be read. */
+export async function screenFingerprint(udid: string, timeoutMs?: number): Promise<string | null> {
+  try {
+    return fingerprintTree(await describeAll(udid, timeoutMs))
+  }
+  catch {
+    return null
+  }
 }
 
 export interface Expectation {
@@ -229,12 +265,19 @@ export interface TargetParams {
   label?: string
 }
 
+export interface ResolvedTarget {
+  x: number
+  y: number
+  /** Non-fatal advisory (e.g. ref resolved without a fresh snapshot). */
+  warning?: string
+}
+
 /**
  * Resolves a tap/type target from coordinates, a snapshot ref, or a label.
  * Label resolution queries the live accessibility tree and prefers exact
  * matches over substring matches.
  */
-export async function resolveTarget(udid: string, { x, y, ref, label }: TargetParams): Promise<{ x: number, y: number }> {
+export async function resolveTarget(udid: string, { x, y, ref, label }: TargetParams): Promise<ResolvedTarget> {
   if (typeof x === 'number' && typeof y === 'number')
     return { x, y }
 
@@ -246,7 +289,14 @@ export async function resolveTarget(udid: string, { x, y, ref, label }: TargetPa
         'STALE_REF',
       )
     }
-    return frameCenter(entry.frame)
+
+    const seen = (refResolveCounts.get(ref) ?? 0) + 1
+    refResolveCounts.set(ref, seen)
+    const warning = seen > 1
+      ? `Ref "${ref}" was already used since the last ui_snapshot; refs are renumbered by every snapshot, so this may target a different element. Call ui_snapshot or target by label.`
+      : undefined
+
+    return { ...frameCenter(entry.frame), warning }
   }
 
   if (label) {
@@ -279,6 +329,8 @@ async function takeSnapshot(udid: string, maxDepth?: number): Promise<SnapshotRe
   const { entries, text } = buildSnapshot(tree, { maxDepth })
 
   currentRefs = new Map(entries.map(entry => [entry.ref, entry]))
+  // Fresh snapshot ⇒ refs renumbered ⇒ reset the re-use guard.
+  refResolveCounts = new Map()
 
   const screenFrame = tree[0] && hasVisibleFrame(tree[0]) ? tree[0].frame : null
   const screen = screenFrame ? `Screen ${screenFrame.width}x${screenFrame.height} points. ` : ''
@@ -423,8 +475,10 @@ export function registerSnapshotTools(server: McpServer): void {
     server.tool(
       'wait_for_element',
       'Polls the accessibility tree until an element matching the search string (against label or identifier) appears, '
-      + 'then returns its type, label, and center coordinates. Use this after navigation or launches instead of '
-      + 'sleeping and re-describing. Fails after the timeout.',
+      + 'then returns its type, label, and center coordinates. Use this to wait for a screen that loads asynchronously '
+      + '(after a launch or network-driven navigation) instead of sleeping and re-describing. '
+      + 'If you are confirming the immediate result of a tap/type, prefer that action\'s expect_appears/expect_gone — '
+      + 'it verifies in the same call. Fails after the timeout.',
       {
         udid: udidSchema,
         search: z

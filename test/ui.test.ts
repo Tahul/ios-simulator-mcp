@@ -24,6 +24,10 @@ afterEach(() => {
   setRunner(null)
 })
 
+function tapCall(calls: RecordedCall[]): RecordedCall | undefined {
+  return calls.find(call => call.args[1] === 'tap')
+}
+
 describe('ui_tap', () => {
   it('builds idb args with -- separating user coordinates', async () => {
     const calls = recordCalls()
@@ -31,8 +35,7 @@ describe('ui_tap', () => {
     const result = await uiTapHandler({ udid: UDID, x: 10, y: 20 })
 
     expect(result.isError).toBe(false)
-    expect(calls).toHaveLength(1)
-    expect(calls[0]?.args).toEqual([
+    expect(tapCall(calls)?.args).toEqual([
       'ui',
       'tap',
       '--udid',
@@ -49,8 +52,8 @@ describe('ui_tap', () => {
 
     await uiTapHandler({ udid: UDID, x: 1, y: 2, duration: '0.5' })
 
-    expect(calls[0]?.args).toContain('--duration')
-    expect(calls[0]?.args).toContain('0.5')
+    expect(tapCall(calls)?.args).toContain('--duration')
+    expect(tapCall(calls)?.args).toContain('0.5')
   })
 
   it('does not treat stderr warnings as failures', async () => {
@@ -86,6 +89,54 @@ describe('ui_tap', () => {
     const block = result.content[0]
     expect(block?.type === 'text' && block.text).toContain('idb not found')
     expect(block?.type === 'text' && block.text).toContain('Troubleshooting Guide')
+  })
+
+  it('warns when the screen does not change after a tap', async () => {
+    const tree = JSON.stringify([
+      { type: 'Button', AXLabel: 'A', frame: { x: 0, y: 0, width: 10, height: 10 } },
+    ])
+    setRunner((_cmd, args) =>
+      Promise.resolve({ stdout: args.includes('describe-all') ? tree : '', stderr: '' }),
+    )
+
+    const result = await uiTapHandler({ udid: UDID, x: 1, y: 2 })
+
+    expect(result.isError).toBe(false)
+    const block = result.content[0]
+    expect(block?.type === 'text' && block.text).toContain('screen did not change')
+    expect(result.structuredContent?.screenUnchanged).toBe(true)
+  })
+
+  it('does not warn when the screen changes after a tap', async () => {
+    let calls = 0
+    setRunner((_cmd, args) => {
+      if (!args.includes('describe-all'))
+        return Promise.resolve({ stdout: '', stderr: '' })
+      calls += 1
+      const tree = JSON.stringify([
+        { type: 'Button', AXLabel: calls >= 2 ? 'B' : 'A', frame: { x: 0, y: 0, width: 10, height: 10 } },
+      ])
+      return Promise.resolve({ stdout: tree, stderr: '' })
+    })
+
+    const result = await uiTapHandler({ udid: UDID, x: 1, y: 2 })
+
+    const block = result.content[0]
+    expect(block?.type === 'text' && block.text).not.toContain('screen did not change')
+    expect(result.structuredContent?.screenUnchanged).toBeUndefined()
+  })
+
+  it('skips the no-op check when an expectation is provided', async () => {
+    const tree = JSON.stringify([
+      { type: 'Button', AXLabel: 'A', frame: { x: 0, y: 0, width: 10, height: 10 } },
+    ])
+    const calls = recordCalls({ idb: { stdout: tree } })
+
+    await uiTapHandler({ udid: UDID, x: 1, y: 2, expect_appears: 'A' })
+
+    // No pre-tap fingerprint: the first idb call is the tap itself.
+    expect(calls.find(c => c.args.includes('describe-all') && c.args[1] === 'describe-all')).toBeDefined()
+    expect(calls[0]?.args[1]).toBe('tap')
   })
 })
 

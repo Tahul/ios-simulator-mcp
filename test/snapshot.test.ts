@@ -102,6 +102,22 @@ describe('resolveTarget', () => {
     expect(await resolveTarget(UDID, { ref: 'e3' })).toEqual({ x: 197, y: 420 })
   })
 
+  it('warns when the same ref is reused without a fresh snapshot', async () => {
+    setRunner(() => Promise.resolve({ stdout: JSON.stringify(TREE), stderr: '' }))
+    await uiSnapshotHandler({ udid: UDID })
+
+    const first = await resolveTarget(UDID, { ref: 'e3' })
+    expect(first.warning).toBeUndefined()
+
+    const second = await resolveTarget(UDID, { ref: 'e3' })
+    expect(second.warning).toContain('renumbered by every snapshot')
+
+    // A new snapshot clears the re-use guard.
+    await uiSnapshotHandler({ udid: UDID })
+    const afterSnapshot = await resolveTarget(UDID, { ref: 'e3' })
+    expect(afterSnapshot.warning).toBeUndefined()
+  })
+
   it('resolves labels against the live tree, preferring exact matches', async () => {
     setRunner(() => Promise.resolve({ stdout: JSON.stringify(TREE), stderr: '' }))
 

@@ -254,7 +254,7 @@ export function registerExpoTools(server: McpServer): void {
       runtime: z
         .enum(['default', 'expo', 'custom'])
         .optional()
-        .describe('"default" lets Metro decide, "custom" forces a dev build, "expo" forces Expo Go'),
+        .describe('"default" (the default) lets Metro decide, "custom" forces a dev build, "expo" forces Expo Go'),
       scheme: z
         .string()
         .max(256)

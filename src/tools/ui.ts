@@ -5,7 +5,7 @@ import { isToolFiltered, udidSchema } from '../lib/constants'
 import { getBootedDeviceId } from '../lib/devices'
 import { errorResult, textResult } from '../lib/errors'
 import { idb } from '../lib/run'
-import { resolveTarget, verifyExpectation } from './snapshot'
+import { resolveTarget, screenFingerprint, verifyExpectation } from './snapshot'
 
 const expectAppearsSchema = z
   .string()
@@ -22,6 +22,14 @@ function expectationSuffix(result: Awaited<ReturnType<typeof verifyExpectation>>
     return ''
   return result.verified ? ` Verified: ${result.detail}.` : ` Warning: ${result.detail} (action was still sent).`
 }
+
+// Short settle window before re-reading the tree for no-op detection, so a
+// just-landed tap has time to drive a transition.
+const NOOP_SETTLE_MS = 600
+
+const SCREEN_UNCHANGED_WARNING
+  = ' Warning: the screen did not change after this tap — it may have hit dead space, a stale ref, or a disabled control. '
+    + 'Call ui_snapshot to re-orient and target by label instead of re-tapping.'
 
 const durationSchema = z
   .string()
@@ -90,17 +98,47 @@ export async function uiTapHandler({ duration, udid, x, y, ref, label, expect_ap
     const actualUdid = await getBootedDeviceId(udid)
     const target = await resolveTarget(actualUdid, { x, y, ref, label })
 
+    const hasExpectation = !!expect_appears || !!expect_gone
+    // Only pay for a no-op check when the caller gave no explicit expectation;
+    // verifyExpectation already provides a stronger signal otherwise.
+    const before = hasExpectation ? null : await screenFingerprint(actualUdid)
+
     await tap(actualUdid, target.x, target.y, duration)
 
     const verification = await verifyExpectation(actualUdid, { appears: expect_appears, gone: expect_gone })
+
+    let noopWarning = ''
+    if (before != null) {
+      await new Promise(resolve => setTimeout(resolve, NOOP_SETTLE_MS))
+      const after = await screenFingerprint(actualUdid)
+      if (after != null && after === before)
+        noopWarning = SCREEN_UNCHANGED_WARNING
+    }
+
+    const refWarning = target.warning ? ` Warning: ${target.warning}` : ''
     return textResult(
-      `Tapped (${target.x}, ${target.y}) successfully.${expectationSuffix(verification)}`,
-      verification ? { verification } : undefined,
+      `Tapped (${target.x}, ${target.y}) successfully.${expectationSuffix(verification)}${refWarning}${noopWarning}`,
+      buildTapStructured(verification, target.warning, noopWarning !== ''),
     )
   }
   catch (error) {
     return errorResult('Error tapping on the screen', error)
   }
+}
+
+function buildTapStructured(
+  verification: Awaited<ReturnType<typeof verifyExpectation>>,
+  refWarning: string | undefined,
+  screenUnchanged: boolean,
+): Record<string, unknown> | undefined {
+  const structured: Record<string, unknown> = {}
+  if (verification)
+    structured.verification = verification
+  if (refWarning)
+    structured.refWarning = refWarning
+  if (screenUnchanged)
+    structured.screenUnchanged = true
+  return Object.keys(structured).length > 0 ? structured : undefined
 }
 
 export interface UiTypeParams {
@@ -117,8 +155,10 @@ export async function uiTypeHandler({ udid, text, ref, label, expect_appears, ex
     const actualUdid = await getBootedDeviceId(udid)
 
     // When a target is given, tap it first so the field has focus.
+    let refWarning: string | undefined
     if (ref || label) {
       const target = await resolveTarget(actualUdid, { ref, label })
+      refWarning = target.warning
       await tap(actualUdid, target.x, target.y)
       await new Promise(resolve => setTimeout(resolve, 300))
     }
@@ -133,9 +173,15 @@ export async function uiTypeHandler({ udid, text, ref, label, expect_appears, ex
     )
 
     const verification = await verifyExpectation(actualUdid, { appears: expect_appears, gone: expect_gone })
+    const refWarningSuffix = refWarning ? ` Warning: ${refWarning}` : ''
+    const structured: Record<string, unknown> = {}
+    if (verification)
+      structured.verification = verification
+    if (refWarning)
+      structured.refWarning = refWarning
     return textResult(
-      `Typed successfully.${expectationSuffix(verification)}`,
-      verification ? { verification } : undefined,
+      `Typed successfully.${expectationSuffix(verification)}${refWarningSuffix}`,
+      Object.keys(structured).length > 0 ? structured : undefined,
     )
   }
   catch (error) {
@@ -223,8 +269,11 @@ export function registerUiTools(server: McpServer): void {
     server.tool(
       'ui_tap',
       'Taps the screen. Target by ref (from ui_snapshot), by label, or by x/y coordinates in points — provide exactly one. '
-      + 'Refs and labels are resolved to the element\'s center, which avoids retina-scaling mis-taps. '
-      + 'Verify the result with ui_snapshot or wait_for_element.',
+      + 'Prefer label over ref: refs are renumbered by every ui_snapshot, so a reused ref can hit the wrong element. '
+      + 'Refs and labels resolve to the element\'s center, avoiding retina-scaling mis-taps. '
+      + 'Without expect_appears/expect_gone the result warns if the screen did not change (likely a dead-space or stale-ref '
+      + 'tap) — when you see that warning, take a fresh ui_snapshot and retarget rather than repeating the same tap. '
+      + 'To confirm a specific outcome in one call, pass expect_appears/expect_gone instead.',
       {
         duration: durationSchema.describe('Press duration in seconds (e.g. "1.5" for a long press)'),
         udid: udidSchema,
@@ -290,7 +339,8 @@ export function registerUiTools(server: McpServer): void {
   if (!isToolFiltered('ui_describe_point')) {
     server.tool(
       'ui_describe_point',
-      'Returns the accessibility element at the given point coordinates. Useful to verify what a tap at (x, y) would hit.',
+      'Returns the accessibility element at the given point coordinates. Useful to verify what a tap at (x, y) would hit — '
+      + 'e.g. to diagnose a tap that warned the screen did not change.',
       {
         udid: udidSchema,
         x: z.number().describe('The x-coordinate'),

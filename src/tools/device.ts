@@ -185,8 +185,9 @@ export function registerDeviceTools(server: McpServer): void {
   if (!isToolFiltered('set_permissions')) {
     server.tool(
       'set_permissions',
-      'Grants, revokes, or resets privacy permissions (camera, location, photos, notifications-adjacent services, ...) '
-      + 'for an app. Pre-grant permissions before automation runs so system permission dialogs never block the flow.',
+      'Grants, revokes, or resets a privacy permission (camera, microphone, location, photos, contacts, calendar, '
+      + 'reminders, motion, media-library, siri) for an app. Pre-grant permissions before automation runs so system '
+      + 'permission dialogs never block the flow. Note: this does not cover the notifications prompt.',
       {
         udid: udidSchema,
         action: z.enum(['grant', 'revoke', 'reset']).describe('What to do with the permission'),
