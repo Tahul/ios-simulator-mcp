@@ -1,191 +1,138 @@
-import type { RunResult } from '../src/lib/run'
 import { afterEach, describe, expect, it } from 'bun:test'
-import { setRunner } from '../src/lib/run'
-import { uiTapHandler, uiTypeHandler } from '../src/tools/ui'
+import { resetSnapshotState } from '../src/lib/ax'
+import { resetScreenSizeCache, setFetchImpl, setWsSessionFactory } from '../src/lib/baguette'
+import {
+  uiKeyHandler,
+  uiPressHandler,
+  uiScrollHandler,
+  uiSwipeHandler,
+  uiTapHandler,
+  uiTypeHandler,
+} from '../src/tools/ui'
+import { axTree, installMockSession, makeMockSession } from './helpers/baguette-mock'
 
 const UDID = '37A360EC-75F9-4AEC-8EFA-10F4A58D8CCA'
 
-interface RecordedCall {
-  cmd: string
-  args: string[]
-}
-
-function recordCalls(results: Record<string, Partial<RunResult>> = {}): RecordedCall[] {
-  const calls: RecordedCall[] = []
-  setRunner((cmd, args) => {
-    calls.push({ cmd, args })
-    const result = results[cmd] ?? {}
-    return Promise.resolve({ stdout: result.stdout ?? '', stderr: result.stderr ?? '' })
-  })
-  return calls
+// chrome.json fetch stub: every gesture resolves screen size first.
+function stubScreen(width = 400, height = 872): void {
+  setFetchImpl((async () => ({
+    ok: true,
+    status: 200,
+    text: async () => JSON.stringify({ screen: { width, height } }),
+    arrayBuffer: async () => new ArrayBuffer(0),
+  })) as any)
 }
 
 afterEach(() => {
-  setRunner(null)
+  setWsSessionFactory(null)
+  setFetchImpl(null)
+  resetScreenSizeCache()
+  resetSnapshotState()
 })
 
-function tapCall(calls: RecordedCall[]): RecordedCall | undefined {
-  return calls.find(call => call.args[1] === 'tap')
-}
-
 describe('ui_tap', () => {
-  it('builds idb args with -- separating user coordinates', async () => {
-    const calls = recordCalls()
+  it('sends a tap envelope with injected width/height', async () => {
+    stubScreen()
+    const session = makeMockSession(() => axTree([{ label: 'A', frame: { x: 0, y: 0, width: 10, height: 10 } }]))
+    installMockSession(session)
 
-    const result = await uiTapHandler({ udid: UDID, x: 10, y: 20 })
-
-    expect(result.isError).toBe(false)
-    expect(tapCall(calls)?.args).toEqual([
-      'ui',
-      'tap',
-      '--udid',
-      UDID,
-      '--json',
-      '--',
-      '10',
-      '20',
-    ])
-  })
-
-  it('includes --duration when provided', async () => {
-    const calls = recordCalls()
-
-    await uiTapHandler({ udid: UDID, x: 1, y: 2, duration: '0.5' })
-
-    expect(tapCall(calls)?.args).toContain('--duration')
-    expect(tapCall(calls)?.args).toContain('0.5')
-  })
-
-  it('does not treat stderr warnings as failures', async () => {
-    recordCalls({ idb: { stderr: 'some non-fatal idb warning' } })
-
-    const result = await uiTapHandler({ udid: UDID, x: 1, y: 2 })
+    const result = await uiTapHandler({ udid: UDID, x: 10, y: 20, expect_appears: 'A' })
 
     expect(result.isError).toBe(false)
+    const tap = session.sent.find(e => e.type === 'tap')
+    expect(tap).toMatchObject({ type: 'tap', x: 10, y: 20, width: 400, height: 872 })
   })
 
-  it('falls back to the booted simulator when udid is omitted', async () => {
-    const deviceList = JSON.stringify({
-      devices: {
-        runtime: [{ udid: UDID, name: 'iPhone 15', state: 'Booted' }],
-      },
-    })
-    const calls = recordCalls({ xcrun: { stdout: deviceList } })
-
-    const result = await uiTapHandler({ x: 5, y: 6 })
-
-    expect(result.isError).toBe(false)
-    expect(calls[0]?.cmd).toBe('xcrun')
-    expect(calls[0]?.args).toEqual(['simctl', 'list', 'devices', '--json'])
-    expect(calls[1]?.args).toContain(UDID)
-  })
-
-  it('returns an error result when the command fails', async () => {
-    setRunner(() => Promise.reject(new Error('idb not found')))
-
-    const result = await uiTapHandler({ udid: UDID, x: 1, y: 2 })
-
-    expect(result.isError).toBe(true)
-    const block = result.content[0]
-    expect(block?.type === 'text' && block.text).toContain('idb not found')
-    expect(block?.type === 'text' && block.text).toContain('Troubleshooting Guide')
+  it('includes duration when provided', async () => {
+    stubScreen()
+    const session = makeMockSession(() => axTree([]))
+    installMockSession(session)
+    await uiTapHandler({ udid: UDID, x: 1, y: 2, duration: 0.5, expect_gone: 'X' })
+    expect(session.sent.find(e => e.type === 'tap')).toMatchObject({ duration: 0.5 })
   })
 
   it('warns when the screen does not change after a tap', async () => {
-    const tree = JSON.stringify([
-      { type: 'Button', AXLabel: 'A', frame: { x: 0, y: 0, width: 10, height: 10 } },
-    ])
-    setRunner((_cmd, args) =>
-      Promise.resolve({ stdout: args.includes('describe-all') ? tree : '', stderr: '' }),
-    )
+    stubScreen()
+    // Same tree before and after → fingerprint identical → no-op warning.
+    installMockSession(makeMockSession(() => axTree([{ label: 'A', frame: { x: 0, y: 0, width: 10, height: 10 } }])))
 
     const result = await uiTapHandler({ udid: UDID, x: 1, y: 2 })
 
-    expect(result.isError).toBe(false)
     const block = result.content[0]
     expect(block?.type === 'text' && block.text).toContain('screen did not change')
     expect(result.structuredContent?.screenUnchanged).toBe(true)
   })
 
-  it('does not warn when the screen changes after a tap', async () => {
-    let calls = 0
-    setRunner((_cmd, args) => {
-      if (!args.includes('describe-all'))
-        return Promise.resolve({ stdout: '', stderr: '' })
-      calls += 1
-      const tree = JSON.stringify([
-        { type: 'Button', AXLabel: calls >= 2 ? 'B' : 'A', frame: { x: 0, y: 0, width: 10, height: 10 } },
-      ])
-      return Promise.resolve({ stdout: tree, stderr: '' })
-    })
+  it('does not warn when the screen changes', async () => {
+    stubScreen()
+    let n = 0
+    installMockSession(makeMockSession(() => {
+      n += 1
+      return axTree([{ label: n >= 2 ? 'B' : 'A', frame: { x: 0, y: 0, width: 10, height: 10 } }])
+    }))
 
     const result = await uiTapHandler({ udid: UDID, x: 1, y: 2 })
-
-    const block = result.content[0]
-    expect(block?.type === 'text' && block.text).not.toContain('screen did not change')
     expect(result.structuredContent?.screenUnchanged).toBeUndefined()
-  })
-
-  it('skips the no-op check when an expectation is provided', async () => {
-    const tree = JSON.stringify([
-      { type: 'Button', AXLabel: 'A', frame: { x: 0, y: 0, width: 10, height: 10 } },
-    ])
-    const calls = recordCalls({ idb: { stdout: tree } })
-
-    await uiTapHandler({ udid: UDID, x: 1, y: 2, expect_appears: 'A' })
-
-    // No pre-tap fingerprint: the first idb call is the tap itself.
-    expect(calls.find(c => c.args.includes('describe-all') && c.args[1] === 'describe-all')).toBeDefined()
-    expect(calls[0]?.args[1]).toBe('tap')
   })
 })
 
 describe('ui_type', () => {
-  it('separates user text with --', async () => {
-    const calls = recordCalls()
-
-    await uiTypeHandler({ udid: UDID, text: '--rm -rf' })
-
-    expect(calls[0]?.args).toEqual([
-      'ui',
-      'text',
-      '--udid',
-      UDID,
-      '--',
-      '--rm -rf',
-    ])
+  it('sends a type envelope', async () => {
+    stubScreen()
+    const session = makeMockSession(() => axTree([]))
+    installMockSession(session)
+    await uiTypeHandler({ udid: UDID, text: 'hello' })
+    expect(session.sent.find(e => e.type === 'type')).toMatchObject({ type: 'type', text: 'hello' })
   })
 
   it('taps the target field first when a label is given', async () => {
-    const tree = [
-      {
-        type: 'TextField',
-        AXUniqueId: 'email-field',
-        frame: { x: 20, y: 300, width: 353, height: 44 },
-      },
-    ]
-    const calls: RecordedCall[] = []
-    setRunner((cmd, args) => {
-      calls.push({ cmd, args })
-      const isDescribe = args.includes('describe-all')
-      return Promise.resolve({ stdout: isDescribe ? JSON.stringify(tree) : '', stderr: '' })
-    })
-
-    const result = await uiTypeHandler({ udid: UDID, text: 'hello', label: 'email-field' })
-
-    expect(result.isError).toBe(false)
-    expect(calls.map(call => call.args[1])).toEqual(['describe-all', 'tap', 'text'])
+    stubScreen()
+    const session = makeMockSession(() => axTree([{ role: 'AXTextField', identifier: 'email', frame: { x: 20, y: 300, width: 300, height: 40 } }]))
+    installMockSession(session)
+    await uiTypeHandler({ udid: UDID, text: 'hi', label: 'email' })
+    const types = session.sent.map(e => e.type)
+    expect(types).toContain('tap')
+    expect(types.indexOf('tap')).toBeLessThan(types.indexOf('type'))
   })
 })
 
-describe('ui_tap with ref/label targeting', () => {
-  it('rejects calls without any target', async () => {
-    recordCalls()
+describe('ui_key / ui_scroll / ui_press', () => {
+  it('sends a key envelope with modifiers', async () => {
+    const session = makeMockSession(() => axTree([]))
+    installMockSession(session)
+    await uiKeyHandler({ udid: UDID, code: 'KeyA', modifiers: ['shift', 'command'] })
+    expect(session.sent[0]).toMatchObject({ type: 'key', code: 'KeyA', modifiers: ['shift', 'command'] })
+  })
 
-    const result = await uiTapHandler({ udid: UDID })
+  it('sends a scroll envelope', async () => {
+    const session = makeMockSession(() => axTree([]))
+    installMockSession(session)
+    await uiScrollHandler({ udid: UDID, delta_y: -50 })
+    expect(session.sent[0]).toMatchObject({ type: 'scroll', deltaX: 0, deltaY: -50 })
+  })
 
-    expect(result.isError).toBe(true)
-    const block = result.content[0]
-    expect(block?.type === 'text' && block.text).toContain('Provide either')
+  it('sends a button envelope', async () => {
+    const session = makeMockSession(() => axTree([]))
+    installMockSession(session)
+    await uiPressHandler({ udid: UDID, button: 'home' })
+    expect(session.sent[0]).toMatchObject({ type: 'button', button: 'home' })
+  })
+})
+
+describe('ui_swipe', () => {
+  it('sends a swipe envelope with screen size', async () => {
+    stubScreen(400, 872)
+    const session = makeMockSession(() => axTree([]))
+    installMockSession(session)
+    await uiSwipeHandler({ udid: UDID, x_start: 200, y_start: 700, x_end: 200, y_end: 100 })
+    expect(session.sent.find(e => e.type === 'swipe')).toMatchObject({
+      type: 'swipe',
+      startX: 200,
+      startY: 700,
+      endX: 200,
+      endY: 100,
+      width: 400,
+      height: 872,
+    })
   })
 })

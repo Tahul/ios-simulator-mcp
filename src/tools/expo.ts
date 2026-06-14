@@ -11,7 +11,7 @@ import {
   withDisableOnboarding,
 } from '../lib/metro'
 import { run } from '../lib/run'
-import { describeAll } from './snapshot'
+import { describeTree } from './snapshot'
 
 export interface ExpoLaunchParams {
   udid?: string
@@ -31,16 +31,16 @@ const DEFAULT_METRO_URL = 'http://localhost:8081'
 const EXPO_GO_BUNDLE_ID = 'host.exp.Exponent'
 
 interface RawAxElement {
-  AXLabel?: string | null
-  type?: string
+  label?: string | null
+  role?: string | null
   children?: RawAxElement[]
 }
 
-function flatten(elements: RawAxElement[], out: RawAxElement[] = []): RawAxElement[] {
-  for (const el of elements) {
-    out.push(el)
-    if (el.children)
-      flatten(el.children, out)
+function flatten(node: RawAxElement, out: RawAxElement[] = []): RawAxElement[] {
+  out.push(node)
+  if (node.children) {
+    for (const child of node.children)
+      flatten(child, out)
   }
   return out
 }
@@ -66,10 +66,10 @@ export async function verifyAppLoaded(udid: string, timeoutMs: number): Promise<
 
   while (true) {
     try {
-      const tree = await describeAll(udid)
-      const flat = flatten(tree)
+      const tree = await describeTree(udid)
+      const flat = flatten(tree as RawAxElement)
       const labels = flat
-        .map(e => e.AXLabel?.trim())
+        .map(e => e.label?.trim())
         .filter((l): l is string => !!l)
 
       const redbox = labels.find(l =>

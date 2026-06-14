@@ -1,11 +1,12 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
+import type { WsSession } from '../lib/baguette'
 import { z } from 'zod'
+import { describeUi, fingerprintTree, frameCenter, resolveTarget } from '../lib/ax'
+import { GESTURE_FLUSH_MS, getScreenSize, resolveBootedUdid, withSession } from '../lib/baguette'
 import { isToolFiltered, udidSchema } from '../lib/constants'
-import { getBootedDeviceId } from '../lib/devices'
 import { errorResult, textResult } from '../lib/errors'
-import { idb } from '../lib/run'
-import { resolveTarget, screenFingerprint, verifyExpectation } from './snapshot'
+import { verifyExpectation } from './snapshot'
 
 const expectAppearsSchema = z
   .string()
@@ -17,116 +18,38 @@ const expectGoneSchema = z
   .optional()
   .describe('After the action, wait briefly and confirm an element with this label/identifier disappears.')
 
-function expectationSuffix(result: Awaited<ReturnType<typeof verifyExpectation>>): string {
-  if (!result)
-    return ''
-  return result.verified ? ` Verified: ${result.detail}.` : ` Warning: ${result.detail} (action was still sent).`
-}
-
-// Short settle window before re-reading the tree for no-op detection, so a
-// just-landed tap has time to drive a transition.
-const NOOP_SETTLE_MS = 600
-
-const SCREEN_UNCHANGED_WARNING
-  = ' Warning: the screen did not change after this tap — it may have hit dead space, a stale ref, or a disabled control. '
-    + 'Call ui_snapshot to re-orient and target by label instead of re-tapping.'
-
-const durationSchema = z
-  .string()
-  .regex(/^\d+(?:\.\d+)?$/)
-  .optional()
-
 const refSchema = z
   .string()
   .optional()
-  .describe('Element ref from the most recent ui_snapshot (e.g. "e12"). Taps the element\'s center.')
+  .describe('Element ref from the most recent ui_snapshot (e.g. "e12"). Resolves to the element\'s center.')
 
 const labelSchema = z
   .string()
   .optional()
   .describe('Element label or accessibility identifier to target (exact match preferred, then substring, case-insensitive)')
 
-export interface UiTapParams {
-  duration?: string
-  udid?: string
-  x?: number
-  y?: number
-  ref?: string
-  label?: string
-  expect_appears?: string
-  expect_gone?: string
+function expectationSuffix(result: Awaited<ReturnType<typeof verifyExpectation>>): string {
+  if (!result)
+    return ''
+  return result.verified ? ` Verified: ${result.detail}.` : ` Warning: ${result.detail} (action was still sent).`
 }
 
-export async function uiDescribeAllHandler({ udid }: { udid?: string }): Promise<CallToolResult> {
+const NOOP_SETTLE_MS = 600
+
+const SCREEN_UNCHANGED_WARNING
+  = ' Warning: the screen did not change after this action — it may have hit dead space, a stale ref, or a disabled '
+    + 'control. Call ui_snapshot to re-orient and target by label instead of repeating.'
+
+async function fingerprint(session: WsSession): Promise<string | null> {
   try {
-    const actualUdid = await getBootedDeviceId(udid)
-
-    const { stdout } = await idb(
-      'ui',
-      'describe-all',
-      '--udid',
-      actualUdid,
-      '--json',
-      '--nested',
-    )
-
-    return textResult(stdout)
+    return fingerprintTree(await describeUi(session))
   }
-  catch (error) {
-    return errorResult('Error describing all of the ui', error)
+  catch {
+    return null
   }
 }
 
-async function tap(udid: string, x: number, y: number, duration?: string): Promise<void> {
-  await idb(
-    'ui',
-    'tap',
-    '--udid',
-    udid,
-    ...(duration ? ['--duration', duration] : []),
-    '--json',
-    // `--` separates options from user-provided positional arguments so
-    // they cannot be misinterpreted as flags.
-    '--',
-    String(x),
-    String(y),
-  )
-}
-
-export async function uiTapHandler({ duration, udid, x, y, ref, label, expect_appears, expect_gone }: UiTapParams): Promise<CallToolResult> {
-  try {
-    const actualUdid = await getBootedDeviceId(udid)
-    const target = await resolveTarget(actualUdid, { x, y, ref, label })
-
-    const hasExpectation = !!expect_appears || !!expect_gone
-    // Only pay for a no-op check when the caller gave no explicit expectation;
-    // verifyExpectation already provides a stronger signal otherwise.
-    const before = hasExpectation ? null : await screenFingerprint(actualUdid)
-
-    await tap(actualUdid, target.x, target.y, duration)
-
-    const verification = await verifyExpectation(actualUdid, { appears: expect_appears, gone: expect_gone })
-
-    let noopWarning = ''
-    if (before != null) {
-      await new Promise(resolve => setTimeout(resolve, NOOP_SETTLE_MS))
-      const after = await screenFingerprint(actualUdid)
-      if (after != null && after === before)
-        noopWarning = SCREEN_UNCHANGED_WARNING
-    }
-
-    const refWarning = target.warning ? ` Warning: ${target.warning}` : ''
-    return textResult(
-      `Tapped (${target.x}, ${target.y}) successfully.${expectationSuffix(verification)}${refWarning}${noopWarning}`,
-      buildTapStructured(verification, target.warning, noopWarning !== ''),
-    )
-  }
-  catch (error) {
-    return errorResult('Error tapping on the screen', error)
-  }
-}
-
-function buildTapStructured(
+function buildStructured(
   verification: Awaited<ReturnType<typeof verifyExpectation>>,
   refWarning: string | undefined,
   screenUnchanged: boolean,
@@ -141,6 +64,89 @@ function buildTapStructured(
   return Object.keys(structured).length > 0 ? structured : undefined
 }
 
+export interface UiTapParams {
+  duration?: number
+  udid?: string
+  x?: number
+  y?: number
+  ref?: string
+  label?: string
+  expect_appears?: string
+  expect_gone?: string
+}
+
+export async function uiTapHandler({ duration, udid, x, y, ref, label, expect_appears, expect_gone }: UiTapParams): Promise<CallToolResult> {
+  try {
+    const actualUdid = await resolveBootedUdid(udid)
+    const size = await getScreenSize(actualUdid)
+
+    return await withSession(actualUdid, async (session) => {
+      const target = await resolveTarget(session, { x, y, ref, label })
+      const hasExpectation = !!expect_appears || !!expect_gone
+      const before = hasExpectation ? null : await fingerprint(session)
+
+      session.send({
+        type: 'tap',
+        x: target.x,
+        y: target.y,
+        width: size.width,
+        height: size.height,
+        ...(duration != null ? { duration } : {}),
+      })
+
+      const verification = await verifyExpectation(session, { appears: expect_appears, gone: expect_gone })
+
+      let noopWarning = ''
+      if (before != null) {
+        await new Promise(resolve => setTimeout(resolve, NOOP_SETTLE_MS))
+        const after = await fingerprint(session)
+        if (after != null && after === before)
+          noopWarning = SCREEN_UNCHANGED_WARNING
+      }
+
+      const refWarning = target.warning ? ` Warning: ${target.warning}` : ''
+      return textResult(
+        `Tapped (${target.x}, ${target.y}) successfully.${expectationSuffix(verification)}${refWarning}${noopWarning}`,
+        buildStructured(verification, target.warning, noopWarning !== ''),
+      )
+    }, { flushMs: GESTURE_FLUSH_MS })
+  }
+  catch (error) {
+    return errorResult('Error tapping on the screen', error)
+  }
+}
+
+export interface UiDoubleTapParams {
+  udid?: string
+  x?: number
+  y?: number
+  ref?: string
+  label?: string
+}
+
+export async function uiDoubleTapHandler({ udid, x, y, ref, label }: UiDoubleTapParams): Promise<CallToolResult> {
+  try {
+    const actualUdid = await resolveBootedUdid(udid)
+    const size = await getScreenSize(actualUdid)
+
+    return await withSession(actualUdid, async (session) => {
+      const target = await resolveTarget(session, { x, y, ref, label })
+      // Two touch1 down/up pairs at the same point on one connection — the
+      // recognizer aggregates them into a double-tap.
+      const base = { x: target.x, y: target.y, width: size.width, height: size.height }
+      session.send({ type: 'touch1-down', ...base })
+      session.send({ type: 'touch1-up', ...base })
+      await new Promise(resolve => setTimeout(resolve, 60))
+      session.send({ type: 'touch1-down', ...base })
+      session.send({ type: 'touch1-up', ...base })
+      return textResult(`Double-tapped (${target.x}, ${target.y}) successfully.`)
+    }, { flushMs: GESTURE_FLUSH_MS })
+  }
+  catch (error) {
+    return errorResult('Error double-tapping on the screen', error)
+  }
+}
+
 export interface UiTypeParams {
   udid?: string
   text: string
@@ -152,135 +158,268 @@ export interface UiTypeParams {
 
 export async function uiTypeHandler({ udid, text, ref, label, expect_appears, expect_gone }: UiTypeParams): Promise<CallToolResult> {
   try {
-    const actualUdid = await getBootedDeviceId(udid)
+    const actualUdid = await resolveBootedUdid(udid)
+    const size = await getScreenSize(actualUdid)
 
-    // When a target is given, tap it first so the field has focus.
-    let refWarning: string | undefined
-    if (ref || label) {
-      const target = await resolveTarget(actualUdid, { ref, label })
-      refWarning = target.warning
-      await tap(actualUdid, target.x, target.y)
-      await new Promise(resolve => setTimeout(resolve, 300))
-    }
+    return await withSession(actualUdid, async (session) => {
+      let refWarning: string | undefined
+      if (ref || label) {
+        const target = await resolveTarget(session, { ref, label })
+        refWarning = target.warning
+        session.send({ type: 'tap', x: target.x, y: target.y, width: size.width, height: size.height })
+        await new Promise(resolve => setTimeout(resolve, 300))
+      }
 
-    await idb(
-      'ui',
-      'text',
-      '--udid',
-      actualUdid,
-      '--',
-      text,
-    )
+      session.send({ type: 'type', text })
 
-    const verification = await verifyExpectation(actualUdid, { appears: expect_appears, gone: expect_gone })
-    const refWarningSuffix = refWarning ? ` Warning: ${refWarning}` : ''
-    const structured: Record<string, unknown> = {}
-    if (verification)
-      structured.verification = verification
-    if (refWarning)
-      structured.refWarning = refWarning
-    return textResult(
-      `Typed successfully.${expectationSuffix(verification)}${refWarningSuffix}`,
-      Object.keys(structured).length > 0 ? structured : undefined,
-    )
+      const verification = await verifyExpectation(session, { appears: expect_appears, gone: expect_gone })
+      const refWarningSuffix = refWarning ? ` Warning: ${refWarning}` : ''
+      return textResult(
+        `Typed successfully.${expectationSuffix(verification)}${refWarningSuffix}`,
+        buildStructured(verification, refWarning, false),
+      )
+    }, { flushMs: GESTURE_FLUSH_MS })
   }
   catch (error) {
-    return errorResult('Error typing text into the iOS Simulator', error)
+    return errorResult('Error typing text into the simulator', error)
+  }
+}
+
+const KEY_CODE_REGEX = /^(?:Key[A-Z]|Digit\d|Enter|Escape|Backspace|Tab|Space|Arrow(?:Up|Down|Left|Right)|Minus|Equal|BracketLeft|BracketRight|Backslash|Semicolon|Quote|Backquote|Comma|Period|Slash)$/
+
+export interface UiKeyParams {
+  udid?: string
+  code: string
+  modifiers?: Array<'shift' | 'control' | 'option' | 'command'>
+  duration?: number
+}
+
+export async function uiKeyHandler({ udid, code, modifiers, duration }: UiKeyParams): Promise<CallToolResult> {
+  try {
+    const actualUdid = await resolveBootedUdid(udid)
+    return await withSession(actualUdid, async (session) => {
+      session.send({
+        type: 'key',
+        code,
+        ...(modifiers && modifiers.length > 0 ? { modifiers } : {}),
+        ...(duration != null ? { duration } : {}),
+      })
+      return textResult(`Sent key ${code}${modifiers?.length ? ` + ${modifiers.join(',')}` : ''}.`)
+    }, { flushMs: GESTURE_FLUSH_MS })
+  }
+  catch (error) {
+    return errorResult('Error sending key', error)
   }
 }
 
 export interface UiSwipeParams {
-  duration?: string
+  duration?: number
   udid?: string
   x_start: number
   y_start: number
   x_end: number
   y_end: number
-  delta?: number
   expect_appears?: string
   expect_gone?: string
 }
 
-export async function uiSwipeHandler({ duration, udid, x_start, y_start, x_end, y_end, delta, expect_appears, expect_gone }: UiSwipeParams): Promise<CallToolResult> {
+export async function uiSwipeHandler({ duration, udid, x_start, y_start, x_end, y_end, expect_appears, expect_gone }: UiSwipeParams): Promise<CallToolResult> {
   try {
-    const actualUdid = await getBootedDeviceId(udid)
+    const actualUdid = await resolveBootedUdid(udid)
+    const size = await getScreenSize(actualUdid)
 
-    await idb(
-      'ui',
-      'swipe',
-      '--udid',
-      actualUdid,
-      ...(duration ? ['--duration', duration] : []),
-      ...(delta ? ['--delta', String(delta)] : []),
-      '--json',
-      '--',
-      String(x_start),
-      String(y_start),
-      String(x_end),
-      String(y_end),
-    )
-
-    const verification = await verifyExpectation(actualUdid, { appears: expect_appears, gone: expect_gone })
-    return textResult(
-      `Swiped successfully.${expectationSuffix(verification)}`,
-      verification ? { verification } : undefined,
-    )
+    return await withSession(actualUdid, async (session) => {
+      session.send({
+        type: 'swipe',
+        startX: x_start,
+        startY: y_start,
+        endX: x_end,
+        endY: y_end,
+        width: size.width,
+        height: size.height,
+        ...(duration != null ? { duration } : {}),
+      })
+      const verification = await verifyExpectation(session, { appears: expect_appears, gone: expect_gone })
+      return textResult(
+        `Swiped (${x_start}, ${y_start}) -> (${x_end}, ${y_end}) successfully.${expectationSuffix(verification)}`,
+        buildStructured(verification, undefined, false),
+      )
+    }, { flushMs: GESTURE_FLUSH_MS })
   }
   catch (error) {
     return errorResult('Error swiping on the screen', error)
   }
 }
 
-export async function uiDescribePointHandler({ udid, x, y }: { udid?: string, x: number, y: number }): Promise<CallToolResult> {
+export interface UiScrollParams {
+  udid?: string
+  delta_x?: number
+  delta_y?: number
+}
+
+export async function uiScrollHandler({ udid, delta_x, delta_y }: UiScrollParams): Promise<CallToolResult> {
   try {
-    const actualUdid = await getBootedDeviceId(udid)
+    const actualUdid = await resolveBootedUdid(udid)
+    return await withSession(actualUdid, async (session) => {
+      session.send({ type: 'scroll', deltaX: delta_x ?? 0, deltaY: delta_y ?? 0 })
+      return textResult(`Scrolled (dx=${delta_x ?? 0}, dy=${delta_y ?? 0}).`)
+    }, { flushMs: GESTURE_FLUSH_MS })
+  }
+  catch (error) {
+    return errorResult('Error scrolling', error)
+  }
+}
 
-    const { stdout } = await idb(
-      'ui',
-      'describe-point',
-      '--udid',
-      actualUdid,
-      '--json',
-      '--',
-      String(x),
-      String(y),
-    )
+export interface UiPinchParams {
+  udid?: string
+  cx: number
+  cy: number
+  start_spread: number
+  end_spread: number
+  duration?: number
+}
 
-    return textResult(stdout)
+export async function uiPinchHandler({ udid, cx, cy, start_spread, end_spread, duration }: UiPinchParams): Promise<CallToolResult> {
+  try {
+    const actualUdid = await resolveBootedUdid(udid)
+    const size = await getScreenSize(actualUdid)
+    return await withSession(actualUdid, async (session) => {
+      session.send({
+        type: 'pinch',
+        cx,
+        cy,
+        startSpread: start_spread,
+        endSpread: end_spread,
+        width: size.width,
+        height: size.height,
+        ...(duration != null ? { duration } : {}),
+      })
+      const verb = end_spread > start_spread ? 'in' : 'out'
+      return textResult(`Pinched ${verb} at (${cx}, ${cy}) (${start_spread} -> ${end_spread} pts).`)
+    }, { flushMs: GESTURE_FLUSH_MS })
+  }
+  catch (error) {
+    return errorResult('Error pinching', error)
+  }
+}
+
+export interface UiPanParams {
+  udid?: string
+  x1: number
+  y1: number
+  x2: number
+  y2: number
+  dx: number
+  dy: number
+  duration?: number
+}
+
+export async function uiPanHandler({ udid, x1, y1, x2, y2, dx, dy, duration }: UiPanParams): Promise<CallToolResult> {
+  try {
+    const actualUdid = await resolveBootedUdid(udid)
+    const size = await getScreenSize(actualUdid)
+    return await withSession(actualUdid, async (session) => {
+      session.send({
+        type: 'pan',
+        x1,
+        y1,
+        x2,
+        y2,
+        dx,
+        dy,
+        width: size.width,
+        height: size.height,
+        ...(duration != null ? { duration } : {}),
+      })
+      return textResult(`Panned two fingers by (${dx}, ${dy}).`)
+    }, { flushMs: GESTURE_FLUSH_MS })
+  }
+  catch (error) {
+    return errorResult('Error panning', error)
+  }
+}
+
+const BUTTONS = [
+  'home',
+  'lock',
+  'power',
+  'volume-up',
+  'volume-down',
+  'action',
+  'app-switcher',
+  'swipe-to-app-switcher',
+  'swipe-to-home',
+  'pull-down-to-lock-screen',
+  'pull-down-to-notification-center',
+] as const
+
+export interface UiPressParams {
+  udid?: string
+  button: (typeof BUTTONS)[number]
+  duration?: number
+}
+
+export async function uiPressHandler({ udid, button, duration }: UiPressParams): Promise<CallToolResult> {
+  try {
+    const actualUdid = await resolveBootedUdid(udid)
+    return await withSession(actualUdid, async (session) => {
+      session.send({ type: 'button', button, ...(duration != null ? { duration } : {}) })
+      return textResult(`Pressed ${button}${duration != null ? ` for ${duration}s` : ''}.`)
+    }, { flushMs: GESTURE_FLUSH_MS })
+  }
+  catch (error) {
+    return errorResult('Error pressing button', error)
+  }
+}
+
+export interface UiDescribePointParams {
+  udid?: string
+  x: number
+  y: number
+}
+
+export async function uiDescribePointHandler({ udid, x, y }: UiDescribePointParams): Promise<CallToolResult> {
+  try {
+    const actualUdid = await resolveBootedUdid(udid)
+    return await withSession(actualUdid, async (session) => {
+      const node = await describeUi(session, { x, y })
+      const center = node.frame ? frameCenter(node.frame) : null
+      return textResult(
+        JSON.stringify({
+          role: node.role ?? null,
+          label: node.label ?? null,
+          value: node.value ?? null,
+          identifier: node.identifier ?? null,
+          frame: node.frame ?? null,
+          center,
+        }),
+        { node },
+      )
+    })
   }
   catch (error) {
     return errorResult(`Error describing point (${x}, ${y})`, error)
   }
 }
 
-export function registerUiTools(server: McpServer): void {
-  if (!isToolFiltered('ui_describe_all')) {
-    server.tool(
-      'ui_describe_all',
-      'Dumps the raw accessibility tree for the entire screen as JSON. Output is large — prefer ui_snapshot for a '
-      + 'compact, ref-based view, or ui_find_element to search. Use this only when you need the full tree with frames.',
-      { udid: udidSchema },
-      { title: 'Describe All UI Elements', readOnlyHint: true, openWorldHint: true },
-      uiDescribeAllHandler,
-    )
-  }
+const durationSchema = z.number().min(0).max(60).optional()
 
+export function registerUiTools(server: McpServer): void {
   if (!isToolFiltered('ui_tap')) {
     server.tool(
       'ui_tap',
-      'Taps the screen. Target by ref (from ui_snapshot), by label, or by x/y coordinates in points — provide exactly one. '
-      + 'Prefer label over ref: refs are renumbered by every ui_snapshot, so a reused ref can hit the wrong element. '
-      + 'Refs and labels resolve to the element\'s center, avoiding retina-scaling mis-taps. '
-      + 'Without expect_appears/expect_gone the result warns if the screen did not change (likely a dead-space or stale-ref '
-      + 'tap) — when you see that warning, take a fresh ui_snapshot and retarget rather than repeating the same tap. '
-      + 'To confirm a specific outcome in one call, pass expect_appears/expect_gone instead.',
+      'Taps the screen. Target by label (preferred), by ref from ui_snapshot, or by x/y coordinates in points — '
+      + 'provide exactly one. Prefer label over ref: refs are renumbered by every ui_snapshot, so a reused ref can hit '
+      + 'the wrong element. Coordinates are device points (NOT pixels, NOT normalized); the screen size is resolved for '
+      + 'you. Without expect_appears/expect_gone the result warns if the screen did not change — when you see that, take '
+      + 'a fresh ui_snapshot and retarget rather than repeating the tap.',
       {
-        duration: durationSchema.describe('Press duration in seconds (e.g. "1.5" for a long press)'),
         udid: udidSchema,
-        x: z.number().optional().describe('The x-coordinate in points (use with y)'),
-        y: z.number().optional().describe('The y-coordinate in points (use with x)'),
+        x: z.number().optional().describe('X coordinate in device points (use with y)'),
+        y: z.number().optional().describe('Y coordinate in device points (use with x)'),
         ref: refSchema,
         label: labelSchema,
+        duration: durationSchema.describe('Press dwell time in seconds (e.g. 1.5 for a long press)'),
         expect_appears: expectAppearsSchema,
         expect_gone: expectGoneSchema,
       },
@@ -289,18 +428,30 @@ export function registerUiTools(server: McpServer): void {
     )
   }
 
+  if (!isToolFiltered('ui_double_tap')) {
+    server.tool(
+      'ui_double_tap',
+      'Double-taps the screen (two quick taps the recognizer aggregates). Target by label, ref, or x/y in points.',
+      {
+        udid: udidSchema,
+        x: z.number().optional().describe('X coordinate in device points (use with y)'),
+        y: z.number().optional().describe('Y coordinate in device points (use with x)'),
+        ref: refSchema,
+        label: labelSchema,
+      },
+      { title: 'UI Double Tap', readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+      uiDoubleTapHandler,
+    )
+  }
+
   if (!isToolFiltered('ui_type')) {
     server.tool(
       'ui_type',
-      'Types text into the iOS Simulator (ASCII only, max 500 chars). Requires a focused text field: pass ref or label '
-      + 'to tap the target field first, or tap it yourself with ui_tap beforehand.',
+      'Types US-ASCII text into the focused field. Pass ref or label to tap the target field first, or tap it yourself '
+      + 'with ui_tap beforehand. Non-ASCII (emoji, accented, CJK) is not supported on this path.',
       {
         udid: udidSchema,
-        text: z
-          .string()
-          .max(500)
-          .regex(/^[\x20-\x7E]+$/)
-          .describe('Text to input (printable ASCII only)'),
+        text: z.string().max(500).regex(/^[\x20-\x7E]+$/).describe('Text to input (printable US-ASCII only)'),
         ref: refSchema,
         label: labelSchema,
         expect_appears: expectAppearsSchema,
@@ -311,23 +462,34 @@ export function registerUiTools(server: McpServer): void {
     )
   }
 
+  if (!isToolFiltered('ui_key')) {
+    server.tool(
+      'ui_key',
+      'Sends a single keystroke by W3C KeyboardEvent.code (e.g. "Enter", "KeyA", "ArrowDown") with optional modifiers. '
+      + 'Use for special keys (Enter/Tab/Escape/arrows) and shortcuts; use ui_type for plain text.',
+      {
+        udid: udidSchema,
+        code: z.string().regex(KEY_CODE_REGEX).describe('W3C KeyboardEvent.code: KeyA-KeyZ, Digit0-9, Enter, Escape, Backspace, Tab, Space, Arrow*, US punctuation'),
+        modifiers: z.array(z.enum(['shift', 'control', 'option', 'command'])).optional().describe('Modifier keys held for the keystroke'),
+        duration: durationSchema.describe('Hold time in seconds'),
+      },
+      { title: 'UI Key', readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+      uiKeyHandler,
+    )
+  }
+
   if (!isToolFiltered('ui_swipe')) {
     server.tool(
       'ui_swipe',
-      'Swipes between two points on the screen (coordinates in points). Useful for scrolling, dismissing sheets, '
-      + 'and pull-to-refresh. For scrolling lists, swipe from the center of the list.',
+      'Swipes between two points (device points). The server interpolates intermediate points. Useful for scrolling '
+      + 'lists, dismissing sheets, and paging. For scrolling, swipe from the center of the scrollable area.',
       {
-        duration: durationSchema.describe('Swipe duration in seconds (e.g., 0.1)'),
         udid: udidSchema,
-        x_start: z.number().describe('The starting x-coordinate'),
-        y_start: z.number().describe('The starting y-coordinate'),
-        x_end: z.number().describe('The ending x-coordinate'),
-        y_end: z.number().describe('The ending y-coordinate'),
-        delta: z
-          .number()
-          .optional()
-          .describe('The size of each step in the swipe (default is 1)')
-          .default(1),
+        x_start: z.number().describe('Start X in device points'),
+        y_start: z.number().describe('Start Y in device points'),
+        x_end: z.number().describe('End X in device points'),
+        y_end: z.number().describe('End Y in device points'),
+        duration: durationSchema.describe('End-to-end swipe duration in seconds (e.g. 0.3)'),
         expect_appears: expectAppearsSchema,
         expect_gone: expectGoneSchema,
       },
@@ -336,15 +498,84 @@ export function registerUiTools(server: McpServer): void {
     )
   }
 
+  if (!isToolFiltered('ui_scroll')) {
+    server.tool(
+      'ui_scroll',
+      'Sends a scroll-wheel event. Negative delta_y scrolls content up (macOS convention). Target-agnostic — no '
+      + 'coordinates needed; use ui_swipe for a positional drag.',
+      {
+        udid: udidSchema,
+        delta_x: z.number().optional().describe('Horizontal scroll delta (default 0)'),
+        delta_y: z.number().optional().describe('Vertical scroll delta; negative scrolls content up (default 0)'),
+      },
+      { title: 'UI Scroll', readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+      uiScrollHandler,
+    )
+  }
+
+  if (!isToolFiltered('ui_pinch')) {
+    server.tool(
+      'ui_pinch',
+      'Two-finger pinch around a center point (device points). end_spread > start_spread zooms in; the server '
+      + 'interpolates the gesture. Use for map/photo zoom.',
+      {
+        udid: udidSchema,
+        cx: z.number().describe('Center X in device points'),
+        cy: z.number().describe('Center Y in device points'),
+        start_spread: z.number().describe('Initial finger separation in points'),
+        end_spread: z.number().describe('Final finger separation in points'),
+        duration: durationSchema.describe('Gesture duration in seconds (e.g. 0.6)'),
+      },
+      { title: 'UI Pinch', readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+      uiPinchHandler,
+    )
+  }
+
+  if (!isToolFiltered('ui_pan')) {
+    server.tool(
+      'ui_pan',
+      'Two-finger parallel pan: both fingers (starting at x1,y1 and x2,y2) translate by (dx, dy) in points. Useful for '
+      + 'two-finger scrolling in apps that ignore single-finger pans (e.g. Maps).',
+      {
+        udid: udidSchema,
+        x1: z.number().describe('First finger start X'),
+        y1: z.number().describe('First finger start Y'),
+        x2: z.number().describe('Second finger start X'),
+        y2: z.number().describe('Second finger start Y'),
+        dx: z.number().describe('Translation X in points'),
+        dy: z.number().describe('Translation Y in points'),
+        duration: durationSchema.describe('Gesture duration in seconds (e.g. 0.5)'),
+      },
+      { title: 'UI Pan', readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+      uiPanHandler,
+    )
+  }
+
+  if (!isToolFiltered('ui_press')) {
+    server.tool(
+      'ui_press',
+      'Presses a hardware or virtual button: home, lock, power, volume-up, volume-down, action, app-switcher, '
+      + 'swipe-to-app-switcher, swipe-to-home, pull-down-to-lock-screen, pull-down-to-notification-center. '
+      + 'Pass duration for long-press semantics (e.g. power held ~1.5s → Siri). "siri" is intentionally unavailable.',
+      {
+        udid: udidSchema,
+        button: z.enum(BUTTONS).describe('Button name'),
+        duration: durationSchema.describe('Hold time in seconds (omit for a short press)'),
+      },
+      { title: 'UI Press', readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+      uiPressHandler,
+    )
+  }
+
   if (!isToolFiltered('ui_describe_point')) {
     server.tool(
       'ui_describe_point',
-      'Returns the accessibility element at the given point coordinates. Useful to verify what a tap at (x, y) would hit — '
-      + 'e.g. to diagnose a tap that warned the screen did not change.',
+      'Returns the topmost accessibility element at the given point coordinates (device points). Useful to verify what '
+      + 'a tap at (x, y) would hit — e.g. to diagnose a tap that warned the screen did not change.',
       {
         udid: udidSchema,
-        x: z.number().describe('The x-coordinate'),
-        y: z.number().describe('The y-coordinate'),
+        x: z.number().describe('X coordinate in device points'),
+        y: z.number().describe('Y coordinate in device points'),
       },
       { title: 'Describe UI Point', readOnlyHint: true, openWorldHint: true },
       uiDescribePointHandler,

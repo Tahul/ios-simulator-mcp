@@ -1,3 +1,4 @@
+import { getDefaultDevice as getBaguetteDefault, resolveBootedUdid, setDefaultDevice as setBaguetteDefault } from './baguette'
 import { ToolError } from './errors'
 import { run } from './run'
 
@@ -60,31 +61,36 @@ export async function getBootedDevice(): Promise<BootedDevice> {
   return parseBootedDevice(stdout)
 }
 
-// Session-sticky default device, set via select_default_device. Lets agents
-// target a specific simulator once instead of passing udid on every call.
-let defaultDeviceId: string | null = null
-
+// The session-sticky default device is owned by the baguette lib so both the
+// baguette-backed and simctl-backed tools resolve to the same device.
 export function setDefaultDevice(udid: string | null): void {
-  defaultDeviceId = udid
+  setBaguetteDefault(udid)
 }
 
 export function getDefaultDevice(): string | null {
-  return defaultDeviceId
+  return getBaguetteDefault()
 }
 
 /**
- * Resolves the target udid: explicit argument > session default > currently
- * booted simulator.
+ * Resolves the target udid for simctl-backed tools: explicit argument >
+ * session default > booted simulator. Prefers baguette's device list (the
+ * primary backend) and falls back to simctl's own booted-device lookup.
  */
 export async function getBootedDeviceId(deviceId?: string): Promise<string> {
   if (deviceId)
     return deviceId
 
-  if (defaultDeviceId)
-    return defaultDeviceId
+  const def = getBaguetteDefault()
+  if (def)
+    return def
 
-  const { id } = await getBootedDevice()
-  return id
+  try {
+    return await resolveBootedUdid()
+  }
+  catch {
+    const { id } = await getBootedDevice()
+    return id
+  }
 }
 
 /** Flattens `simctl list devices --json` into available devices across runtimes. */

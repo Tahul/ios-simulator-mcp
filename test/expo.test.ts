@@ -1,7 +1,10 @@
+import type { AxNode } from '../src/lib/ax'
 import type { RunResult } from '../src/lib/run'
 import { afterEach, describe, expect, it, mock } from 'bun:test'
+import { setWsSessionFactory } from '../src/lib/baguette'
 import { setRunner } from '../src/lib/run'
 import { expoLaunchHandler } from '../src/tools/expo'
+import { makeMockSession } from './helpers/baguette-mock'
 
 const BOOTED = JSON.stringify({
   devices: {
@@ -9,26 +12,27 @@ const BOOTED = JSON.stringify({
   },
 })
 
-// A loaded RN screen: many labeled elements.
-const LOADED_TREE = JSON.stringify([{
-  type: 'Application',
+// A loaded RN screen: many labeled elements (baguette AxNode shape).
+const LOADED_TREE: AxNode = {
+  role: 'AXApplication',
   frame: { x: 0, y: 0, width: 393, height: 852 },
   children: Array.from({ length: 8 }, (_, i) => ({
-    type: 'StaticText',
-    AXLabel: `Item ${i}`,
+    role: 'AXStaticText',
+    label: `Item ${i}`,
     frame: { x: 0, y: i * 30, width: 100, height: 20 },
+    children: [],
   })),
-}])
+}
 
-const REDBOX_TREE = JSON.stringify([{
-  type: 'Application',
+const REDBOX_TREE: AxNode = {
+  role: 'AXApplication',
   frame: { x: 0, y: 0, width: 393, height: 852 },
   children: [
-    { type: 'StaticText', AXLabel: 'Unable to load script. Make sure Metro is running', frame: { x: 0, y: 0, width: 300, height: 40 } },
-    { type: 'Button', AXLabel: 'Reload', frame: { x: 0, y: 50, width: 80, height: 30 } },
-    { type: 'Button', AXLabel: 'Dismiss', frame: { x: 90, y: 50, width: 80, height: 30 } },
+    { role: 'AXStaticText', label: 'Unable to load script. Make sure Metro is running', frame: { x: 0, y: 0, width: 300, height: 40 }, children: [] },
+    { role: 'AXButton', label: 'Reload', frame: { x: 0, y: 50, width: 80, height: 30 }, children: [] },
+    { role: 'AXButton', label: 'Dismiss', frame: { x: 90, y: 50, width: 80, height: 30 }, children: [] },
   ],
-}])
+}
 
 interface RecordedCall {
   cmd: string
@@ -44,6 +48,7 @@ const realFetch = globalThis.fetch
 
 afterEach(() => {
   setRunner(null)
+  setWsSessionFactory(null)
   globalThis.fetch = realFetch
 })
 
@@ -54,10 +59,9 @@ describe('expo_launch', () => {
       calls.push({ cmd, args })
       if (args.includes('list'))
         return Promise.resolve({ stdout: BOOTED, stderr: '' })
-      if (args.includes('describe-all'))
-        return Promise.resolve({ stdout: LOADED_TREE, stderr: '' })
       return Promise.resolve({ stdout: '', stderr: '' })
     })
+    setWsSessionFactory(() => Promise.resolve(makeMockSession(() => LOADED_TREE)))
 
     globalThis.fetch = mock(async (url: string | URL) => {
       const u = url.toString()
@@ -89,10 +93,9 @@ describe('expo_launch', () => {
     setRunner((_cmd, args) => {
       if (args.includes('list'))
         return Promise.resolve({ stdout: BOOTED, stderr: '' })
-      if (args.includes('describe-all'))
-        return Promise.resolve({ stdout: REDBOX_TREE, stderr: '' })
       return Promise.resolve({ stdout: '', stderr: '' })
     })
+    setWsSessionFactory(() => Promise.resolve(makeMockSession(() => REDBOX_TREE)))
 
     globalThis.fetch = mock(async (url: string | URL) => {
       const u = url.toString()

@@ -1,69 +1,50 @@
 import { afterEach, describe, expect, it } from 'bun:test'
-import { setRunner } from '../src/lib/run'
-import { appLogsHandler, buildLogArgs } from '../src/tools/logs'
+import { setFetchImpl, setLogCollector } from '../src/lib/baguette'
+import { appLogsHandler } from '../src/tools/logs'
 
 const UDID = '37A360EC-75F9-4AEC-8EFA-10F4A58D8CCA'
 
 afterEach(() => {
-  setRunner(null)
+  setLogCollector(null)
+  setFetchImpl(null)
 })
 
-describe('buildLogArgs', () => {
-  it('builds a bounded log show command', () => {
-    expect(buildLogArgs({ udid: UDID, sinceS: 60 })).toEqual([
-      'simctl',
-      'spawn',
-      UDID,
-      'log',
-      'show',
-      '--style',
-      'compact',
-      '--last',
-      '60s',
-    ])
+describe('app_logs', () => {
+  it('returns collected lines with a structured payload', async () => {
+    setLogCollector(() => Promise.resolve(['line one', 'line two']))
+
+    const result = await appLogsHandler({ udid: UDID })
+
+    expect(result.isError).toBe(false)
+    const block = result.content[0]
+    expect(block?.type === 'text' && block.text).toContain('line one')
+    expect(result.structuredContent?.totalLines).toBe(2)
+    expect(result.structuredContent?.truncated).toBe(false)
   })
 
-  it('adds a process predicate', () => {
-    const args = buildLogArgs({ udid: UDID, process: 'Spotter', sinceS: 30 })
-    expect(args).toContain('--predicate')
-    expect(args[args.indexOf('--predicate') + 1]).toBe('process == "Spotter"')
-  })
-
-  it('ANDs process and raw predicates', () => {
-    const args = buildLogArgs({
-      udid: UDID,
-      process: 'Spotter',
-      predicate: 'subsystem CONTAINS "react"',
-      sinceS: 30,
+  it('passes filters through to the collector', async () => {
+    let captured: any
+    setLogCollector((udid, opts) => {
+      captured = { udid, opts }
+      return Promise.resolve(['x'])
     })
-    expect(args[args.indexOf('--predicate') + 1]).toBe(
-      'process == "Spotter" AND (subsystem CONTAINS "react")',
-    )
-  })
-})
 
-describe('app_logs handler', () => {
-  it('caps output to max_lines, newest last', async () => {
-    const lines = Array.from({ length: 300 }, (_, i) => `line ${i + 1}`)
-    setRunner(() => Promise.resolve({ stdout: lines.join('\n'), stderr: '' }))
+    await appLogsHandler({ udid: UDID, bundle_id: 'com.example.app', level: 'debug', max_lines: 50, window_s: 2 })
 
-    const result = await appLogsHandler({ udid: UDID, max_lines: 100 })
-
-    expect(result.isError).toBe(false)
-    const block = result.content[0]
-    const text = block?.type === 'text' ? block.text : ''
-    expect(text).toContain('showing last 100 of 300 lines')
-    expect(text).toContain('line 300')
-    expect(text).not.toContain('line 200\n')
+    expect(captured.udid).toBe(UDID)
+    expect(captured.opts).toMatchObject({ bundleId: 'com.example.app', level: 'debug', maxLines: 50, windowMs: 2000 })
   })
 
-  it('reports when there are no entries', async () => {
-    setRunner(() => Promise.resolve({ stdout: '', stderr: '' }))
-
-    const result = await appLogsHandler({ udid: UDID, process: 'Spotter' })
-
-    expect(result.isError).toBe(false)
+  it('reports an empty capture clearly', async () => {
+    setLogCollector(() => Promise.resolve([]))
+    const result = await appLogsHandler({ udid: UDID, window_s: 1 })
     const block = result.content[0]
-    expect(block?.type === 'text' && block.text).toContain('No log entries in the last 60s for process "Spotter"')
+    expect(block?.type === 'text' && block.text).toContain('No log entries')
+  })
+
+  it('flags truncation when maxLines is hit', async () => {
+    setLogCollector(() => Promise.resolve(['a', 'b', 'c']))
+    const result = await appLogsHandler({ udid: UDID, max_lines: 3 })
+    expect(result.structuredContent?.truncated).toBe(true)
   })
 })

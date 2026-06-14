@@ -1,25 +1,32 @@
 import { afterEach, describe, expect, it } from 'bun:test'
+import { setFetchImpl } from '../src/lib/baguette'
 import { getBootedDeviceId, getDefaultDevice, setDefaultDevice } from '../src/lib/devices'
 import { setRunner } from '../src/lib/run'
 import { selectDefaultDeviceHandler } from '../src/tools/simulator'
 
-const FIXTURE = JSON.stringify({
-  devices: {
-    rt: [
-      { udid: 'AAA', name: 'iPhone 17 Pro', state: 'Shutdown', isAvailable: true },
-      { udid: 'BBB', name: 'iPhone 17', state: 'Booted', isAvailable: true },
-    ],
-  },
+const BAG_LIST = JSON.stringify({
+  running: [{ udid: 'BBB', name: 'iPhone 17', runtime: 'iOS 26.5', state: 'Booted' }],
+  available: [{ udid: 'AAA', name: 'iPhone 17 Pro', runtime: 'iOS 26.5', state: 'Shutdown' }],
 })
+
+function stubBaguetteList(): void {
+  setFetchImpl((async () => ({
+    ok: true,
+    status: 200,
+    text: async () => BAG_LIST,
+    arrayBuffer: async () => new ArrayBuffer(0),
+  })) as any)
+}
 
 afterEach(() => {
   setRunner(null)
+  setFetchImpl(null)
   setDefaultDevice(null)
 })
 
 describe('select_default_device', () => {
   it('sets a session default that getBootedDeviceId honors', async () => {
-    setRunner(() => Promise.resolve({ stdout: FIXTURE, stderr: '' }))
+    stubBaguetteList()
 
     const result = await selectDefaultDeviceHandler({ name: 'iPhone 17 Pro' })
 

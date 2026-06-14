@@ -1,75 +1,51 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
 import { z } from 'zod'
+import { collectLogs, resolveBootedUdid } from '../lib/baguette'
 import { isToolFiltered, udidSchema } from '../lib/constants'
-import { getBootedDeviceId } from '../lib/devices'
 import { errorResult, textResult } from '../lib/errors'
-import { run } from '../lib/run'
-
-export interface LogArgsInput {
-  udid: string
-  process?: string
-  predicate?: string
-  sinceS: number
-}
-
-/**
- * Builds the `simctl spawn <udid> log show` argument list. Uses `log show
- * --last` (bounded) rather than `log stream` so the tool call always returns.
- */
-export function buildLogArgs({ udid, process, predicate, sinceS }: LogArgsInput): string[] {
-  const args = ['simctl', 'spawn', udid, 'log', 'show', '--style', 'compact', '--last', `${sinceS}s`]
-
-  const predicates: string[] = []
-  if (process)
-    predicates.push(`process == "${process}"`)
-  if (predicate)
-    predicates.push(`(${predicate})`)
-  if (predicates.length > 0)
-    args.push('--predicate', predicates.join(' AND '))
-
-  return args
-}
 
 export interface AppLogsParams {
   udid?: string
-  process?: string
+  level?: 'default' | 'info' | 'debug'
   predicate?: string
-  since_s?: number
+  bundle_id?: string
+  window_s?: number
   max_lines?: number
 }
 
-export async function appLogsHandler({ udid, process, predicate, since_s, max_lines }: AppLogsParams): Promise<CallToolResult> {
+export async function appLogsHandler({ udid, level, predicate, bundle_id, window_s, max_lines }: AppLogsParams): Promise<CallToolResult> {
   try {
-    const actualUdid = await getBootedDeviceId(udid)
-    const sinceS = since_s ?? 60
+    const actualUdid = await resolveBootedUdid(udid)
     const maxLines = max_lines ?? 200
+    const windowMs = (window_s ?? 4) * 1000
 
-    const { stdout } = await run(
-      'xcrun',
-      buildLogArgs({ udid: actualUdid, process, predicate, sinceS }),
-    )
-
-    const lines = stdout.split('\n').filter(line => line.length > 0)
-    if (lines.length === 0)
-      return textResult(`No log entries in the last ${sinceS}s${process ? ` for process "${process}"` : ''}.`)
-
-    const shown = lines.slice(-maxLines)
-    const header = lines.length > shown.length
-      ? `(showing last ${shown.length} of ${lines.length} lines — narrow with process/predicate or raise max_lines)\n`
-      : ''
-
-    return textResult(header + shown.join('\n'), {
-      lines: shown,
-      totalLines: lines.length,
-      truncated: lines.length > shown.length,
+    const lines = await collectLogs(actualUdid, {
+      level,
+      predicate,
+      bundleId: bundle_id,
+      maxLines,
+      windowMs,
     })
+
+    if (lines.length === 0) {
+      return textResult(
+        `No log entries within ${windowMs / 1000}s${bundle_id ? ` for bundle "${bundle_id}"` : ''}. `
+        + 'The simulator may be idle, or the filter excluded everything.',
+      )
+    }
+
+    const truncated = lines.length >= maxLines
+    const header = truncated
+      ? `(captured ${lines.length} lines — raise max_lines or narrow with bundle_id/predicate)\n`
+      : ''
+    return textResult(header + lines.join('\n'), { lines, totalLines: lines.length, truncated })
   }
   catch (error) {
     return errorResult(
       'Error reading simulator logs',
       error,
-      'Check the process name with list_apps (CFBundleExecutable is usually the process name, not the bundle id).',
+      'Logs stream from a running baguette server. Ensure the simulator is booted and baguette serve is reachable.',
     )
   }
 }
@@ -80,37 +56,16 @@ export function registerLogTools(server: McpServer): void {
 
   server.tool(
     'app_logs',
-    'Reads recent console logs from the iOS Simulator (unified logging via `log show`). JS errors, RedBox messages, '
-    + 'and native crashes surface here — use this to debug instead of relying on screenshots alone. '
-    + 'Filter by process name (the app\'s executable name, e.g. "Expo Go" or your app target name — NOT the bundle id) '
-    + 'to avoid system noise. Returns at most max_lines of the newest entries.',
+    'Reads a bounded batch of recent unified-log lines from the simulator (via baguette\'s live log stream). JS errors, '
+    + 'RedBox messages, and native crashes surface here — use this to debug instead of relying on screenshots alone. '
+    + 'Filter by bundle_id or an NSPredicate to cut system noise. Captures until max_lines or window_s elapses.',
     {
       udid: udidSchema,
-      process: z
-        .string()
-        .max(128)
-        .regex(/^[\w .()-]+$/)
-        .optional()
-        .describe('Process name to filter by (executable name, not bundle id)'),
-      predicate: z
-        .string()
-        .max(512)
-        .optional()
-        .describe('Advanced: raw NSPredicate for `log show` (e.g. subsystem CONTAINS "com.facebook.react"). ANDed with the process filter'),
-      since_s: z
-        .number()
-        .int()
-        .min(1)
-        .max(3600)
-        .optional()
-        .describe('How many seconds back to read (default 60)'),
-      max_lines: z
-        .number()
-        .int()
-        .min(1)
-        .max(2000)
-        .optional()
-        .describe('Maximum number of newest lines to return (default 200)'),
+      level: z.enum(['default', 'info', 'debug']).optional().describe('Log level (iOS runtime accepts only default | info | debug). Default info-and-above'),
+      predicate: z.string().max(512).optional().describe('Raw NSPredicate (e.g. subsystem == "com.facebook.react"). ANDed with bundle_id'),
+      bundle_id: z.string().max(256).optional().describe('Filter to a process/bundle id (shorthand for process == "<id>")'),
+      window_s: z.number().min(1).max(30).optional().describe('Seconds to collect before returning (default 4)'),
+      max_lines: z.number().int().min(1).max(2000).optional().describe('Stop after this many lines (default 200)'),
     },
     { title: 'App Logs', readOnlyHint: true, openWorldHint: true },
     appLogsHandler,

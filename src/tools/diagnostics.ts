@@ -1,6 +1,7 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
 import { z } from 'zod'
+import { listDevices, resolveBaseUrls } from '../lib/baguette'
 import { isToolFiltered } from '../lib/constants'
 import { parseDeviceList } from '../lib/devices'
 import { textResult } from '../lib/errors'
@@ -41,19 +42,33 @@ export async function doctorHandler({ metro_url }: DoctorParams): Promise<CallTo
   const simctl = await tryRun('xcrun', ['simctl', 'help'])
   checks.push({ name: 'simctl', ok: simctl.ok, detail: simctl.ok ? 'available' : simctl.out })
 
-  // idb resolution + invocation
+  // baguette server — the primary backend for screen control + input.
+  let baguetteOk = false
+  let baguetteDetail = ''
+  const bases = resolveBaseUrls()
+  try {
+    const { running, available } = await listDevices()
+    baguetteOk = true
+    baguetteDetail = `reachable (${running.length} booted, ${available.length} available)`
+  }
+  catch (error) {
+    baguetteDetail = `unreachable at ${bases.join(', ')}: ${(error as Error).message.split('\n')[0]}`
+  }
+  checks.push({ name: 'baguette', ok: baguetteOk, detail: baguetteDetail })
+
+  // idb is optional now (only a legacy fallback); report but never block.
   let idbDetail = ''
   let idbOk = false
   try {
     const idbPath = resolveIdbPath()
     const probe = await tryRun(idbPath, ['--help'])
     idbOk = probe.ok
-    idbDetail = probe.ok ? `available (${idbPath})` : `${idbPath}: ${probe.out}`
+    idbDetail = probe.ok ? `available (${idbPath})` : `optional — not found (${probe.out})`
   }
   catch (error) {
-    idbDetail = (error as Error).message
+    idbDetail = `optional — ${(error as Error).message}`
   }
-  checks.push({ name: 'idb', ok: idbOk, detail: idbDetail })
+  checks.push({ name: 'idb (optional)', ok: idbOk, detail: idbDetail })
 
   // Runtimes + devices
   let bootedSummary = 'none'
@@ -97,7 +112,9 @@ export async function doctorHandler({ metro_url }: DoctorParams): Promise<CallTo
   if (deviceLines.length > 0)
     lines.push('', 'Available simulators:', ...deviceLines)
 
-  const blocking = checks.filter(c => !c.ok && c.name !== 'Simulators').map(c => c.name)
+  const blocking = checks
+    .filter(c => !c.ok && c.name !== 'Simulators' && !c.name.includes('optional'))
+    .map(c => c.name)
   const summary = blocking.length === 0
     ? 'Environment looks healthy.'
     : `Problems with: ${blocking.join(', ')}. See the troubleshooting guide.`
@@ -119,9 +136,9 @@ export function registerDiagnosticsTools(server: McpServer): void {
 
   server.tool(
     'doctor',
-    'Preflight check of the automation environment: Xcode, simctl, idb (the UI-interaction dependency), available and '
-    + 'booted simulators, and whether Metro is reachable. Call this first when something is not working, or at the start '
-    + 'of a session — it reports exactly what is missing and how to fix it.',
+    'Preflight check of the automation environment: Xcode, simctl, the baguette server (the screen-control + input '
+    + 'backend), available and booted simulators, optional idb, and whether Metro is reachable. Call this first when '
+    + 'something is not working, or at the start of a session — it reports exactly what is missing and how to fix it.',
     {
       metro_url: z.string().max(2048).optional().describe('Metro URL to probe (default http://localhost:8081)'),
     },

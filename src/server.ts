@@ -5,8 +5,8 @@ import { registerBootTools } from './tools/boot'
 import { registerDeviceTools } from './tools/device'
 import { registerDiagnosticsTools } from './tools/diagnostics'
 import { registerExpoTools } from './tools/expo'
-import { registerFindElementTool } from './tools/find-element'
 import { registerLogTools } from './tools/logs'
+import { registerOrientationTools } from './tools/orientation'
 import { registerRecordingTools } from './tools/recording'
 import { registerScreenshotTools } from './tools/screenshot'
 import { registerSessionTools } from './tools/session'
@@ -16,23 +16,25 @@ import { registerUiTools } from './tools/ui'
 
 /**
  * Server-level usage guidance, surfaced to MCP hosts via the initialize
- * response. Hosts like zidane render these into the agent's system context.
+ * response. Hosts render these into the agent's system context.
  */
-const INSTRUCTIONS = `iOS Simulator automation. Tools wrap \`xcrun simctl\` and Facebook idb.
+const INSTRUCTIONS = `iOS Simulator automation. Screen control, input, and the accessibility tree run through a baguette server (HTTP + WebSocket, default http://power-yael:8421 then http://localhost:8421; override with BAGUETTE_URL). For authenticated/hosted baguette (e.g. https://ios.yael.dev), also set BAGUETTE_TOKEN; REST uses Authorization: Bearer and WebSockets use ?token=. App lifecycle (install/launch/permissions/push/Expo) still uses xcrun simctl.
 
 Workflow:
-- If anything is misbehaving or at session start, call doctor — it reports Xcode/idb/simulator/Metro health and how to fix gaps.
-- Every tool accepts an optional \`udid\` and defaults to the currently booted simulator — do not call get_booted_sim_id first. To pin a device for the session, call select_default_device once.
-- See the screen with ui_snapshot (compact, ref-based) or ui_inspect (snapshot + screenshot in one call). Prefer these over ui_describe_all.
-- Act by passing \`label\` (preferred) or \`ref\` to ui_tap / ui_type instead of raw coordinates. Refs are renumbered by every ui_snapshot, so a reused ref can hit a different element — re-snapshot before reusing one, or target by label.
-- Confirm actions in the same call with expect_appears / expect_gone. Otherwise a tap that changes nothing returns a "screen did not change" warning — when you see it (or a ref-reuse warning), re-snapshot and retarget; do NOT repeat the same tap. Use ui_describe_point to check what is actually at a coordinate.
-- After an async load (launch, network-driven navigation), use wait_for_element instead of sleeping and re-describing.
-- Debug with app_logs (JS errors, RedBox, native crashes) — do not rely on screenshots alone.
-- Find bundle identifiers with list_apps; reset an app to a clean state with reset_app.
-- Errors include a machine-readable [CODE] and a recovery hint — branch on it (e.g. NO_BOOTED_SIM -> boot_sim, METRO_UNREACHABLE -> start Metro).
+- If anything misbehaves or at session start, call doctor — it reports baguette/Xcode/simctl/Metro health and how to fix gaps.
+- Every tool accepts an optional \`udid\` and defaults to the booted simulator — do not look it up first. To pin a device for the session, call select_default_device once. List devices with list_sims; boot with boot_sim.
+- See the screen with ui_snapshot (compact, ref-based, from the accessibility tree) or ui_inspect (snapshot + screenshot in one call), or ui_view for just the image.
+- COORDINATES ARE DEVICE POINTS — not pixels, not normalized. The screen size is resolved for you; just pass x/y in points, or (better) target by label/ref so you never compute coordinates.
+- Act by passing \`label\` (preferred) or \`ref\` to ui_tap / ui_type. Refs are renumbered by every ui_snapshot, so a reused ref can hit a different element — re-snapshot before reusing one, or target by label.
+- Confirm actions in the same call with expect_appears / expect_gone. Otherwise a tap that changes nothing returns a "screen did not change" warning — when you see it (or a ref-reuse warning), re-snapshot and retarget; do NOT repeat the same tap. Use ui_describe_point to check what is at a coordinate.
+- Input vocabulary: ui_tap, ui_double_tap, ui_swipe, ui_scroll, ui_type (US-ASCII), ui_key (Enter/Tab/arrows/shortcuts), ui_pinch, ui_pan, and ui_press for hardware/virtual buttons (home/lock/power/volume/action/app-switcher/swipe-to-home/...). Rotate with set_orientation.
+- After an async load (launch, network navigation), use wait_for_element instead of sleeping and re-describing.
+- Debug with app_logs (JS errors, RedBox, native crashes) — do not rely on screenshots alone. Find bundle ids with list_apps; reset an app with reset_app.
+- Screenshots/AX need a frame: an idle simulator may emit nothing — send a gesture (e.g. ui_press home) to wake it, then retry.
+- Errors include a machine-readable [CODE] and a recovery hint — branch on it.
 
 Expo / React Native:
-- To start an Expo app, use expo_launch — it boots a simulator if needed, waits for Metro, resolves the exact deep link (dev client or Expo Go) from Metro, and opens it in one call. Pass runtime="custom" for a dev build, "expo" for Expo Go.
+- To start an Expo app, use expo_launch — it boots a simulator if needed, waits for Metro, resolves the exact deep link, and opens it in one call. Pass runtime="custom" for a dev build, "expo" for Expo Go.
 - NEVER pass EX_UPDATES_URL or any EX_UPDATES_* env var to launch_app — it sends expo-updates into a reload loop against Metro. These keys are rejected.
 - Only fall back to launch_app/open_url if you specifically need to bypass Metro resolution.`
 
@@ -49,11 +51,11 @@ export function createServer(): McpServer {
 
   registerSimulatorTools(server)
   registerBootTools(server)
+  registerOrientationTools(server)
   registerDiagnosticsTools(server)
   registerExpoTools(server)
   registerUiTools(server)
   registerSnapshotTools(server)
-  registerFindElementTool(server)
   registerScreenshotTools(server)
   registerRecordingTools(server)
   registerLogTools(server)

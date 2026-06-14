@@ -1,7 +1,8 @@
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { afterEach, describe, expect, it } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
+import { setFetchImpl } from '../src/lib/baguette'
 import { cleanupStaleTmpDirs } from '../src/lib/paths'
 import { setRunner } from '../src/lib/run'
 import { resetRecordingState } from '../src/tools/recording'
@@ -14,8 +15,15 @@ function text(result: { content: Array<{ type: string, text?: string }> }): stri
   return block?.type === 'text' ? block.text ?? '' : ''
 }
 
+beforeEach(() => {
+  // Device resolution prefers baguette; keep it offline so tests exercise the
+  // simctl fallback (the runner seam) deterministically.
+  setFetchImpl((async () => { throw new Error('offline') }) as any)
+})
+
 afterEach(() => {
   setRunner(null)
+  setFetchImpl(null)
   resetRecordingState()
 })
 
