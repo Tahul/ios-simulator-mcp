@@ -18,7 +18,7 @@ import { registerUiTools } from './tools/ui'
  * Server-level usage guidance, surfaced to MCP hosts via the initialize
  * response. Hosts render these into the agent's system context.
  */
-const INSTRUCTIONS = `iOS Simulator automation. Screen control, input, and the accessibility tree run through a baguette server (HTTP + WebSocket, default http://power-yael:8421 then http://localhost:8421; override with BAGUETTE_URL). For authenticated/hosted baguette (e.g. https://ios.yael.dev), also set BAGUETTE_TOKEN; REST uses Authorization: Bearer and WebSockets use ?token=. App lifecycle (install/launch/permissions/push/Expo) still uses xcrun simctl.
+const INSTRUCTIONS = `iOS Simulator automation. Screen control, input, and the accessibility tree run through a baguette server (HTTP + WebSocket, default http://localhost:8421; override with BAGUETTE_URL). For authenticated/hosted baguette (e.g. https://ios.yael.dev), also set BAGUETTE_TOKEN; REST uses Authorization: Bearer and WebSockets use ?token=. App lifecycle (install/launch/permissions/push/Expo) still uses xcrun simctl.
 
 Workflow:
 - If anything misbehaves or at session start, call doctor — it reports baguette/Xcode/simctl/Metro health and how to fix gaps.

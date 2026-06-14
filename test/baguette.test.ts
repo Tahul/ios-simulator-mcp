@@ -102,37 +102,15 @@ class ClosingAfterSendWebSocket {
   close(): void {}
 }
 
-class LogFallbackWebSocket {
-  onopen: (() => void) | null = null
-  onerror: (() => void) | null = null
-  onclose: (() => void) | null = null
-  onmessage: ((ev: { data: string }) => void) | null = null
-  binaryType = 'arraybuffer'
-  constructor(url: string) {
-    if (url.includes('power-yael')) {
-      queueMicrotask(() => this.onclose?.())
-      return
-    }
-
-    queueMicrotask(() => {
-      this.onopen?.()
-      this.onmessage?.({ data: JSON.stringify({ type: 'log', line: 'ready' }) })
-    })
-  }
-
-  send(_data: string): void {}
-  close(): void {}
-}
-
 describe('resolveBaseUrls', () => {
   it('uses BAGUETTE_URL when set (stripping trailing slash)', () => {
     process.env.BAGUETTE_URL = 'http://example:9000/'
     expect(resolveBaseUrls()).toEqual(['http://example:9000'])
   })
 
-  it('falls back to power-yael then localhost', () => {
+  it('defaults to local baguette only', () => {
     delete process.env.BAGUETTE_URL
-    expect(resolveBaseUrls()).toEqual(['http://power-yael:8421', 'http://localhost:8421'])
+    expect(resolveBaseUrls()).toEqual(['http://localhost:8421'])
   })
 })
 
@@ -268,10 +246,10 @@ describe('WS request/reply FIFO', () => {
 })
 
 describe('collectLogs', () => {
-  it('falls through when a logs socket closes before opening', async () => {
-    globalThis.WebSocket = LogFallbackWebSocket as unknown as typeof WebSocket
+  it('rejects when the logs socket closes before opening', async () => {
+    globalThis.WebSocket = ClosingBeforeOpenWebSocket as unknown as typeof WebSocket
 
-    await expect(collectLogs('UDID', { maxLines: 1, windowMs: 1000 })).resolves.toEqual(['ready'])
+    await expect(collectLogs('UDID', { maxLines: 1, windowMs: 1000 })).rejects.toThrow(/Could not reach/)
   })
 })
 

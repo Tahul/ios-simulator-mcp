@@ -16,7 +16,7 @@ import { ToolError } from './errors'
  * ToolError pointing the user at `baguette serve` / BAGUETTE_URL.
  */
 
-const DEFAULT_BASES = ['http://power-yael:8421', 'http://localhost:8421']
+const DEFAULT_BASES = ['http://localhost:8421']
 
 /** Resolves candidate base URLs: env override first, then the defaults. */
 export function resolveBaseUrls(): string[] {
