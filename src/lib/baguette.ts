@@ -5,7 +5,7 @@ import { ToolError } from './errors'
  * Client for a running `baguette serve` instance (HTTP + WebSocket).
  *
  * Transport split (confirmed against a live server):
- * - Plain HTTP: list, boot, shutdown, orientation, chrome.json, screenshot.jpg.
+ * - Plain HTTP: list, boot, shutdown, orientation, definition.json/chrome.json, screenshot.jpg.
  * - Stream WebSocket (/simulators/:udid/stream): ALL interactive input
  *   (tap/swipe/type/key/press/scroll/pinch/pan/streaming touches) plus the
  *   request/reply verbs describe_ui and snapshot. The stream socket does NOT
@@ -262,8 +262,25 @@ interface ChromeLayout {
   composite?: { width: number, height: number }
 }
 
+interface SimulatorDefinition {
+  screen?: {
+    rect?: { width: number, height: number }
+    viewport?: { width: number, height: number }
+  }
+}
+
+function screenSizeFromGeometry(data: ChromeLayout & SimulatorDefinition): ScreenSize | null {
+  if (data.screen?.rect && typeof data.screen.rect.width === 'number' && typeof data.screen.rect.height === 'number')
+    return { width: data.screen.rect.width, height: data.screen.rect.height }
+
+  if (data.screen && typeof data.screen.width === 'number' && typeof data.screen.height === 'number')
+    return { width: data.screen.width, height: data.screen.height }
+
+  return null
+}
+
 // Screen size (device points) per UDID. Stable for a device, so caching avoids
-// a chrome.json round-trip on every gesture.
+// a geometry round-trip on every gesture.
 const screenSizeCache = new Map<string, ScreenSize>()
 
 /** Test seam: clear the per-UDID screen-size cache. */
@@ -272,8 +289,10 @@ export function resetScreenSizeCache(): void {
 }
 
 /**
- * Resolves a device's screen size in points from chrome.json. Required for
- * every gesture (baguette normalizes x/y against width/height). Cached.
+ * Resolves a device's screen size in points. Versioned baguette exposes this
+ * through definition.json; legacy local baguette also supports chrome.json.
+ * Required for every gesture (baguette normalizes x/y against width/height).
+ * Cached.
  */
 export async function getScreenSize(udid: string): Promise<ScreenSize> {
   const cached = screenSizeCache.get(udid)
@@ -281,17 +300,16 @@ export async function getScreenSize(udid: string): Promise<ScreenSize> {
     return cached
 
   const { status, text } = await httpFetch(
-    base => apiPath(base, `/api/v1/simulators/${udid}/chrome.json`, `/simulators/${udid}/chrome.json`),
+    base => apiPath(base, `/api/v1/simulators/${udid}/definition.json`, `/simulators/${udid}/chrome.json`),
   )
   if (status !== 200)
     throw new ToolError(status === 401 || status === 403 ? statusMessage('screen geometry', status) : `Could not read screen geometry for ${udid} (HTTP ${status})`, status === 401 || status === 403 ? 'INVALID_ARGUMENT' : 'DEVICE_NOT_FOUND')
 
-  const layout = parseJson<ChromeLayout>(text, 'chrome.json')
-  const screen = layout.screen
-  if (!screen || typeof screen.width !== 'number' || typeof screen.height !== 'number')
-    throw new ToolError(`chrome.json for ${udid} has no usable screen size`, 'UNKNOWN')
+  const geometry = parseJson<ChromeLayout & SimulatorDefinition>(text, 'screen geometry')
+  const size = screenSizeFromGeometry(geometry)
+  if (!size)
+    throw new ToolError(`Screen geometry for ${udid} has no usable screen size`, 'UNKNOWN')
 
-  const size: ScreenSize = { width: screen.width, height: screen.height }
   screenSizeCache.set(udid, size)
   return size
 }

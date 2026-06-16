@@ -254,7 +254,7 @@ describe('collectLogs', () => {
 })
 
 describe('getScreenSize', () => {
-  it('reads screen from chrome.json and caches it', async () => {
+  it('reads screen from legacy chrome.json and caches it', async () => {
     let hits = 0
     stub((url) => {
       if (url.includes('/chrome.json')) {
@@ -268,5 +268,25 @@ describe('getScreenSize', () => {
     // second call is served from cache (no extra fetch)
     expect(await getScreenSize('A')).toEqual({ width: 400, height: 872 })
     expect(hits).toBe(1)
+  })
+
+  it('reads screen rect from versioned definition.json', async () => {
+    process.env.BAGUETTE_URL = 'https://ios.example.test'
+    process.env.BAGUETTE_TOKEN = 'secret-token'
+    let captured: string | undefined
+    stub((url) => {
+      captured = url
+      return {
+        body: JSON.stringify({
+          screen: {
+            viewport: { width: 454, height: 908 },
+            rect: { x: 27, y: 18, width: 400, height: 872 },
+          },
+        }),
+      }
+    })
+
+    expect(await getScreenSize('A')).toEqual({ width: 400, height: 872 })
+    expect(captured).toBe('https://ios.example.test/api/v1/simulators/A/definition.json')
   })
 })

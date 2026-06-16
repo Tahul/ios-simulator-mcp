@@ -13,7 +13,7 @@ import { axTree, installMockSession, makeMockSession } from './helpers/baguette-
 
 const UDID = '37A360EC-75F9-4AEC-8EFA-10F4A58D8CCA'
 
-// chrome.json fetch stub: every gesture resolves screen size first.
+// Geometry fetch stub: every gesture resolves screen size first.
 function stubScreen(width = 400, height = 872): void {
   setFetchImpl((async () => ({
     ok: true,
