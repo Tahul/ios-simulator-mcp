@@ -34,6 +34,25 @@ const REDBOX_TREE: AxNode = {
   ],
 }
 
+const DEV_MENU_TREE: AxNode = {
+  role: 'AXApplication',
+  frame: { x: 0, y: 0, width: 393, height: 852 },
+  children: [
+    { role: 'AXStaticText', label: 'React Native Developer Menu', frame: { x: 40, y: 120, width: 280, height: 40 }, children: [] },
+    { role: 'AXButton', label: 'Reload', frame: { x: 40, y: 200, width: 180, height: 40 }, children: [] },
+    { role: 'AXButton', label: 'Close', frame: { x: 300, y: 80, width: 60, height: 40 }, children: [] },
+  ],
+}
+
+const DEV_MENU_WITHOUT_CLOSE_TREE: AxNode = {
+  role: 'AXApplication',
+  frame: { x: 0, y: 0, width: 393, height: 852 },
+  children: [
+    { role: 'AXStaticText', label: 'Development Menu', frame: { x: 40, y: 120, width: 280, height: 40 }, children: [] },
+    { role: 'AXButton', label: 'Open Debugger', frame: { x: 40, y: 200, width: 180, height: 40 }, children: [] },
+  ],
+}
+
 interface RecordedCall {
   cmd: string
   args: string[]
@@ -91,12 +110,13 @@ describe('expo_launch', () => {
   })
 
   it('reports a RedBox error overlay as the outcome', async () => {
+    const session = makeMockSession(() => REDBOX_TREE)
     setRunner((_cmd, args) => {
       if (args.includes('list'))
         return Promise.resolve({ stdout: BOOTED, stderr: '' })
       return Promise.resolve({ stdout: '', stderr: '' })
     })
-    setWsSessionFactory(() => Promise.resolve(makeMockSession(() => REDBOX_TREE)))
+    setWsSessionFactory(() => Promise.resolve(session))
 
     globalThis.fetch = mock(async (url: string | URL) => {
       const u = url.toString()
@@ -111,6 +131,61 @@ describe('expo_launch', () => {
     const out = text(result)
     expect(out).toContain('shows an error')
     expect((result.structuredContent as { outcome: string }).outcome).toBe('redbox')
+    expect(session.sent.some(e => e.type === 'tap')).toBe(false)
+  })
+
+  it('dismisses the React Native development menu before verification', async () => {
+    const session = makeMockSession(call => call === 0 ? DEV_MENU_TREE : LOADED_TREE)
+    const calls: RecordedCall[] = []
+    setRunner((cmd, args) => {
+      calls.push({ cmd, args })
+      if (args.includes('list'))
+        return Promise.resolve({ stdout: BOOTED, stderr: '' })
+      return Promise.resolve({ stdout: '', stderr: '' })
+    })
+    setWsSessionFactory(() => Promise.resolve(session))
+
+    globalThis.fetch = mock(async (url: string | URL) => {
+      const u = url.toString()
+      if (u.includes('/_expo/open'))
+        return { ok: true, json: async () => ({ url: 'exp://localhost:8081', runtime: 'expo' }) } as Response
+      return { ok: true } as Response
+    }) as unknown as typeof fetch
+
+    const result = await expoLaunchHandler({ udid: 'AAA', runtime: 'expo' })
+
+    expect(result.isError).toBe(false)
+    expect(text(result)).toContain('dismissed development menu')
+    expect(session.sent.find(e => e.type === 'tap')).toMatchObject({
+      type: 'tap',
+      x: 330,
+      y: 100,
+      width: 393,
+      height: 852,
+    })
+    expect(calls.some(c => c.args.includes('openurl'))).toBe(true)
+  })
+
+  it('uses Escape when a development menu has no dismiss button', async () => {
+    const session = makeMockSession(call => call === 0 ? DEV_MENU_WITHOUT_CLOSE_TREE : LOADED_TREE)
+    setRunner((_cmd, args) => {
+      if (args.includes('list'))
+        return Promise.resolve({ stdout: BOOTED, stderr: '' })
+      return Promise.resolve({ stdout: '', stderr: '' })
+    })
+    setWsSessionFactory(() => Promise.resolve(session))
+
+    globalThis.fetch = mock(async (url: string | URL) => {
+      const u = url.toString()
+      if (u.includes('/_expo/open'))
+        return { ok: true, json: async () => ({ url: 'exp://localhost:8081', runtime: 'expo' }) } as Response
+      return { ok: true } as Response
+    }) as unknown as typeof fetch
+
+    const result = await expoLaunchHandler({ udid: 'AAA', runtime: 'expo' })
+
+    expect(result.isError).toBe(false)
+    expect(session.sent.find(e => e.type === 'key')).toMatchObject({ type: 'key', code: 'Escape' })
   })
 
   it('cold-starts Expo Go by terminating it before opening', async () => {

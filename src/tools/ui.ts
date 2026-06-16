@@ -1,6 +1,6 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
-import type { WsSession } from '../lib/baguette'
+import type { ScreenSize, WsSession } from '../lib/baguette'
 import { z } from 'zod'
 import { describeUi, fingerprintTree, frameCenter, resolveTarget } from '../lib/ax'
 import { GESTURE_FLUSH_MS, getScreenSize, resolveBootedUdid, withSession } from '../lib/baguette'
@@ -40,6 +40,9 @@ const SCREEN_UNCHANGED_WARNING
   = ' Warning: the screen did not change after this action — it may have hit dead space, a stale ref, or a disabled '
     + 'control. Call ui_snapshot to re-orient and target by label instead of repeating.'
 
+const GEOMETRY_RECOVERY_WARNING
+  = ' Warning: recovered screen size from the accessibility tree because baguette geometry was unavailable.'
+
 async function fingerprint(session: WsSession): Promise<string | null> {
   try {
     return fingerprintTree(await describeUi(session))
@@ -53,6 +56,7 @@ function buildStructured(
   verification: Awaited<ReturnType<typeof verifyExpectation>>,
   refWarning: string | undefined,
   screenUnchanged: boolean,
+  recoveryWarning?: string,
 ): Record<string, unknown> | undefined {
   const structured: Record<string, unknown> = {}
   if (verification)
@@ -61,7 +65,27 @@ function buildStructured(
     structured.refWarning = refWarning
   if (screenUnchanged)
     structured.screenUnchanged = true
+  if (recoveryWarning)
+    structured.recoveryWarning = recoveryWarning
   return Object.keys(structured).length > 0 ? structured : undefined
+}
+
+async function resolveGestureSize(udid: string, session: WsSession): Promise<{ size: ScreenSize, warning?: string }> {
+  try {
+    return { size: await getScreenSize(udid) }
+  }
+  catch (geometryError) {
+    try {
+      const tree = await describeUi(session)
+      const frame = tree.frame
+      if (frame && typeof frame.width === 'number' && typeof frame.height === 'number' && frame.width > 0 && frame.height > 0)
+        return { size: { width: frame.width, height: frame.height }, warning: GEOMETRY_RECOVERY_WARNING }
+    }
+    catch {
+      // Preserve the original geometry error; it has the most actionable route/status detail.
+    }
+    throw geometryError
+  }
 }
 
 export interface UiTapParams {
@@ -78,9 +102,9 @@ export interface UiTapParams {
 export async function uiTapHandler({ duration, udid, x, y, ref, label, expect_appears, expect_gone }: UiTapParams): Promise<CallToolResult> {
   try {
     const actualUdid = await resolveBootedUdid(udid)
-    const size = await getScreenSize(actualUdid)
 
     return await withSession(actualUdid, async (session) => {
+      const { size, warning: sizeWarning } = await resolveGestureSize(actualUdid, session)
       const target = await resolveTarget(session, { x, y, ref, label })
       const hasExpectation = !!expect_appears || !!expect_gone
       const before = hasExpectation ? null : await fingerprint(session)
@@ -106,8 +130,8 @@ export async function uiTapHandler({ duration, udid, x, y, ref, label, expect_ap
 
       const refWarning = target.warning ? ` Warning: ${target.warning}` : ''
       return textResult(
-        `Tapped (${target.x}, ${target.y}) successfully.${expectationSuffix(verification)}${refWarning}${noopWarning}`,
-        buildStructured(verification, target.warning, noopWarning !== ''),
+        `Tapped (${target.x}, ${target.y}) successfully.${expectationSuffix(verification)}${refWarning}${noopWarning}${sizeWarning ?? ''}`,
+        buildStructured(verification, target.warning, noopWarning !== '', sizeWarning),
       )
     }, { flushMs: GESTURE_FLUSH_MS })
   }
@@ -127,9 +151,9 @@ export interface UiDoubleTapParams {
 export async function uiDoubleTapHandler({ udid, x, y, ref, label }: UiDoubleTapParams): Promise<CallToolResult> {
   try {
     const actualUdid = await resolveBootedUdid(udid)
-    const size = await getScreenSize(actualUdid)
 
     return await withSession(actualUdid, async (session) => {
+      const { size, warning: sizeWarning } = await resolveGestureSize(actualUdid, session)
       const target = await resolveTarget(session, { x, y, ref, label })
       // Two touch1 down/up pairs at the same point on one connection — the
       // recognizer aggregates them into a double-tap.
@@ -139,7 +163,7 @@ export async function uiDoubleTapHandler({ udid, x, y, ref, label }: UiDoubleTap
       await new Promise(resolve => setTimeout(resolve, 60))
       session.send({ type: 'touch1-down', ...base })
       session.send({ type: 'touch1-up', ...base })
-      return textResult(`Double-tapped (${target.x}, ${target.y}) successfully.`)
+      return textResult(`Double-tapped (${target.x}, ${target.y}) successfully.${sizeWarning ?? ''}`, sizeWarning ? { recoveryWarning: sizeWarning } : undefined)
     }, { flushMs: GESTURE_FLUSH_MS })
   }
   catch (error) {
@@ -159,9 +183,9 @@ export interface UiTypeParams {
 export async function uiTypeHandler({ udid, text, ref, label, expect_appears, expect_gone }: UiTypeParams): Promise<CallToolResult> {
   try {
     const actualUdid = await resolveBootedUdid(udid)
-    const size = await getScreenSize(actualUdid)
 
     return await withSession(actualUdid, async (session) => {
+      const { size, warning: sizeWarning } = await resolveGestureSize(actualUdid, session)
       let refWarning: string | undefined
       if (ref || label) {
         const target = await resolveTarget(session, { ref, label })
@@ -175,8 +199,8 @@ export async function uiTypeHandler({ udid, text, ref, label, expect_appears, ex
       const verification = await verifyExpectation(session, { appears: expect_appears, gone: expect_gone })
       const refWarningSuffix = refWarning ? ` Warning: ${refWarning}` : ''
       return textResult(
-        `Typed successfully.${expectationSuffix(verification)}${refWarningSuffix}`,
-        buildStructured(verification, refWarning, false),
+        `Typed successfully.${expectationSuffix(verification)}${refWarningSuffix}${sizeWarning ?? ''}`,
+        buildStructured(verification, refWarning, false, sizeWarning),
       )
     }, { flushMs: GESTURE_FLUSH_MS })
   }
@@ -226,9 +250,9 @@ export interface UiSwipeParams {
 export async function uiSwipeHandler({ duration, udid, x_start, y_start, x_end, y_end, expect_appears, expect_gone }: UiSwipeParams): Promise<CallToolResult> {
   try {
     const actualUdid = await resolveBootedUdid(udid)
-    const size = await getScreenSize(actualUdid)
 
     return await withSession(actualUdid, async (session) => {
+      const { size, warning: sizeWarning } = await resolveGestureSize(actualUdid, session)
       session.send({
         type: 'swipe',
         startX: x_start,
@@ -241,8 +265,8 @@ export async function uiSwipeHandler({ duration, udid, x_start, y_start, x_end, 
       })
       const verification = await verifyExpectation(session, { appears: expect_appears, gone: expect_gone })
       return textResult(
-        `Swiped (${x_start}, ${y_start}) -> (${x_end}, ${y_end}) successfully.${expectationSuffix(verification)}`,
-        buildStructured(verification, undefined, false),
+        `Swiped (${x_start}, ${y_start}) -> (${x_end}, ${y_end}) successfully.${expectationSuffix(verification)}${sizeWarning ?? ''}`,
+        buildStructured(verification, undefined, false, sizeWarning),
       )
     }, { flushMs: GESTURE_FLUSH_MS })
   }
@@ -282,8 +306,8 @@ export interface UiPinchParams {
 export async function uiPinchHandler({ udid, cx, cy, start_spread, end_spread, duration }: UiPinchParams): Promise<CallToolResult> {
   try {
     const actualUdid = await resolveBootedUdid(udid)
-    const size = await getScreenSize(actualUdid)
     return await withSession(actualUdid, async (session) => {
+      const { size, warning: sizeWarning } = await resolveGestureSize(actualUdid, session)
       session.send({
         type: 'pinch',
         cx,
@@ -295,7 +319,7 @@ export async function uiPinchHandler({ udid, cx, cy, start_spread, end_spread, d
         ...(duration != null ? { duration } : {}),
       })
       const verb = end_spread > start_spread ? 'in' : 'out'
-      return textResult(`Pinched ${verb} at (${cx}, ${cy}) (${start_spread} -> ${end_spread} pts).`)
+      return textResult(`Pinched ${verb} at (${cx}, ${cy}) (${start_spread} -> ${end_spread} pts).${sizeWarning ?? ''}`, sizeWarning ? { recoveryWarning: sizeWarning } : undefined)
     }, { flushMs: GESTURE_FLUSH_MS })
   }
   catch (error) {
@@ -317,8 +341,8 @@ export interface UiPanParams {
 export async function uiPanHandler({ udid, x1, y1, x2, y2, dx, dy, duration }: UiPanParams): Promise<CallToolResult> {
   try {
     const actualUdid = await resolveBootedUdid(udid)
-    const size = await getScreenSize(actualUdid)
     return await withSession(actualUdid, async (session) => {
+      const { size, warning: sizeWarning } = await resolveGestureSize(actualUdid, session)
       session.send({
         type: 'pan',
         x1,
@@ -331,7 +355,7 @@ export async function uiPanHandler({ udid, x1, y1, x2, y2, dx, dy, duration }: U
         height: size.height,
         ...(duration != null ? { duration } : {}),
       })
-      return textResult(`Panned two fingers by (${dx}, ${dy}).`)
+      return textResult(`Panned two fingers by (${dx}, ${dy}).${sizeWarning ?? ''}`, sizeWarning ? { recoveryWarning: sizeWarning } : undefined)
     }, { flushMs: GESTURE_FLUSH_MS })
   }
   catch (error) {

@@ -23,6 +23,15 @@ function stubScreen(width = 400, height = 872): void {
   })) as any)
 }
 
+function stubMissingGeometry(): void {
+  setFetchImpl((async () => ({
+    ok: false,
+    status: 404,
+    text: async () => '',
+    arrayBuffer: async () => new ArrayBuffer(0),
+  })) as any)
+}
+
 afterEach(() => {
   setWsSessionFactory(null)
   setFetchImpl(null)
@@ -73,6 +82,21 @@ describe('ui_tap', () => {
 
     const result = await uiTapHandler({ udid: UDID, x: 1, y: 2 })
     expect(result.structuredContent?.screenUnchanged).toBeUndefined()
+  })
+
+  it('recovers screen size from the accessibility tree when geometry is unavailable', async () => {
+    stubMissingGeometry()
+    const session = makeMockSession(() => axTree([{ label: 'Spotter', frame: { x: 200, y: 200, width: 80, height: 40 } }]))
+    installMockSession(session)
+
+    const result = await uiTapHandler({ udid: UDID, label: 'Spotter', expect_appears: 'Spotter' })
+
+    expect(result.isError).toBe(false)
+    const tap = session.sent.find(e => e.type === 'tap')
+    expect(tap).toMatchObject({ type: 'tap', x: 240, y: 220, width: 400, height: 872 })
+    const block = result.content[0]
+    expect(block?.type === 'text' && block.text).toContain('recovered screen size')
+    expect(result.structuredContent?.recoveryWarning).toContain('recovered screen size')
   })
 })
 
@@ -134,5 +158,21 @@ describe('ui_swipe', () => {
       width: 400,
       height: 872,
     })
+  })
+
+  it('recovers screen size from the accessibility tree when geometry is unavailable', async () => {
+    stubMissingGeometry()
+    const session = makeMockSession(() => axTree([]))
+    installMockSession(session)
+
+    const result = await uiSwipeHandler({ udid: UDID, x_start: 350, y_start: 400, x_end: 50, y_end: 400 })
+
+    expect(result.isError).toBe(false)
+    expect(session.sent.find(e => e.type === 'swipe')).toMatchObject({
+      type: 'swipe',
+      width: 400,
+      height: 872,
+    })
+    expect(result.structuredContent?.recoveryWarning).toContain('recovered screen size')
   })
 })

@@ -1,6 +1,8 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
 import { z } from 'zod'
+import { describeUi, frameCenter } from '../lib/ax'
+import { GESTURE_FLUSH_MS, withSession } from '../lib/baguette'
 import { isToolFiltered } from '../lib/constants'
 import { ensureBooted } from '../lib/devices'
 import { errorResultWithLogs } from '../lib/error-logs'
@@ -34,6 +36,7 @@ const EXPO_GO_BUNDLE_ID = 'host.exp.Exponent'
 interface RawAxElement {
   label?: string | null
   role?: string | null
+  frame?: { x: number, y: number, width: number, height: number }
   children?: RawAxElement[]
 }
 
@@ -54,6 +57,76 @@ export interface LaunchVerification {
 }
 
 const VERIFY_POLL_MS = 750
+
+const DEV_MENU_LABEL_PATTERNS = [
+  /developer menu/i,
+  /development menu/i,
+  /react native dev/i,
+  /expo menu/i,
+  /open debugger/i,
+  /configure bundler/i,
+  /fast refresh/i,
+  /toggle inspector/i,
+  /show performance monitor/i,
+]
+
+const DEV_MENU_DISMISS_LABEL = /^(?:close|dismiss|cancel|done)$/i
+
+export interface DevelopmentMenuDismissal {
+  dismissed: boolean
+  detail: string
+}
+
+function isDevelopmentMenu(labels: string[]): boolean {
+  return labels.some(label => DEV_MENU_LABEL_PATTERNS.some(pattern => pattern.test(label)))
+}
+
+function rootSize(tree: RawAxElement): { width: number, height: number } | null {
+  const frame = tree.frame
+  if (frame && frame.width > 0 && frame.height > 0)
+    return { width: frame.width, height: frame.height }
+  return null
+}
+
+/**
+ * Best-effort cleanup for RN/Expo dev menus that sometimes remain over the app
+ * after opening a deep link. Never throws: launch/verification should continue.
+ */
+export async function dismissDevelopmentMenu(udid: string): Promise<DevelopmentMenuDismissal | null> {
+  try {
+    return await withSession(udid, async (session) => {
+      const tree = await describeUi(session) as RawAxElement
+      const flat = flatten(tree)
+      const labels = flat
+        .map(e => e.label?.trim())
+        .filter((l): l is string => !!l)
+
+      if (!isDevelopmentMenu(labels))
+        return null
+
+      const dismissTarget = flat.find(node =>
+        node.frame
+        && node.label
+        && DEV_MENU_DISMISS_LABEL.test(node.label.trim()),
+      )
+
+      if (dismissTarget?.frame) {
+        const size = rootSize(tree)
+        if (size) {
+          const point = frameCenter(dismissTarget.frame)
+          session.send({ type: 'tap', x: point.x, y: point.y, width: size.width, height: size.height })
+          return { dismissed: true, detail: `tapped "${dismissTarget.label}"` }
+        }
+      }
+
+      session.send({ type: 'key', code: 'Escape' })
+      return { dismissed: true, detail: 'sent Escape' }
+    }, { flushMs: GESTURE_FLUSH_MS })
+  }
+  catch {
+    return null
+  }
+}
 
 /**
  * After opening the deep link, polls the accessibility tree to decide whether
@@ -198,6 +271,10 @@ export async function expoLaunchHandler({
     attemptedAppOpen = true
     await run('xcrun', ['simctl', 'openurl', device.udid, '--', finalUrl])
     steps.push('opened deep link')
+
+    const devMenuDismissal = await dismissDevelopmentMenu(device.udid)
+    if (devMenuDismissal?.dismissed)
+      steps.push(`dismissed development menu: ${devMenuDismissal.detail}`)
 
     // 5. Verify the app actually rendered (not just that the link opened)
     let verification = null
