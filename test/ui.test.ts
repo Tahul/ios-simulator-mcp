@@ -98,6 +98,20 @@ describe('ui_tap', () => {
     expect(block?.type === 'text' && block.text).toContain('recovered screen size')
     expect(result.structuredContent?.recoveryWarning).toContain('recovered screen size')
   })
+
+  it('steers agents back to MCP tools when input still fails', async () => {
+    stubMissingGeometry()
+    installMockSession(makeMockSession(() => null))
+
+    const result = await uiTapHandler({ udid: UDID, label: 'Safari' })
+
+    expect(result.isError).toBe(true)
+    const block = result.content[0]
+    expect(block?.type === 'text' && block.text).toContain('Do not fall back to shell idb/xcrun coordinate tapping')
+    expect(result.structuredContent?.error).toMatchObject({
+      mcpRecovery: expect.stringContaining('Stay within the MCP tools'),
+    })
+  })
 })
 
 describe('ui_type', () => {

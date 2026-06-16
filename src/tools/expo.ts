@@ -341,9 +341,8 @@ export function registerExpoTools(server: McpServer): void {
     + 'guessing), and opens it. This is the preferred way to start an Expo app: it is deterministic and never uses '
     + 'EX_UPDATES_* env vars. Use runtime="custom" to force a development build, "expo" to force Expo Go. '
     + 'By default does a clean (cold) start by terminating the host app first so no stale JS state or error overlay '
-    + 'carries over; for a dev client pass bundle_id so it knows which app to terminate. '
-    + 'Note: the in-app Expo dev menu (Cmd+D) cannot be toggled via simctl/idb and does not auto-open after a deep-link '
-    + 'launch. Defaults to Metro at http://localhost:8081.',
+    + 'carries over; for a dev client pass bundle_id so it knows which app to terminate. After opening, it best-effort '
+    + 'dismisses any React Native/Expo development menu before verification. Defaults to Metro at http://localhost:8081.',
     {
       udid: z.string().optional().describe('Specific simulator UDID (default: booted, else first available)'),
       device_name: z.string().optional().describe('Boot/select a simulator by name (e.g. "iPhone 17 Pro")'),

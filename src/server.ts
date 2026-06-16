@@ -28,13 +28,14 @@ Workflow:
 - Act by passing \`label\` (preferred) or \`ref\` to ui_tap / ui_type. Refs are renumbered by every ui_snapshot, so a reused ref can hit a different element — re-snapshot before reusing one, or target by label.
 - Confirm actions in the same call with expect_appears / expect_gone. Otherwise a tap that changes nothing returns a "screen did not change" warning — when you see it (or a ref-reuse warning), re-snapshot and retarget; do NOT repeat the same tap. Use ui_describe_point to check what is at a coordinate.
 - Input vocabulary: ui_tap, ui_double_tap, ui_swipe, ui_scroll, ui_type (US-ASCII), ui_key (Enter/Tab/arrows/shortcuts), ui_pinch, ui_pan, and ui_press for hardware/virtual buttons (home/lock/power/volume/action/app-switcher/swipe-to-home/...). Rotate with set_orientation.
+- If an input tool fails, recover with MCP tools (ui_snapshot/ui_inspect, boot_sim/select_default_device, doctor). Do NOT switch to shell idb/xcrun coordinate tapping; it bypasses refs, warnings, and recovery.
 - After an async load (launch, network navigation), use wait_for_element instead of sleeping and re-describing.
 - Debug with app_logs (JS errors, RedBox, native crashes) — do not rely on screenshots alone. Find bundle ids with list_apps; reset an app with reset_app.
 - Screenshots/AX need a frame: an idle simulator may emit nothing — send a gesture (e.g. ui_press home) to wake it, then retry.
 - Errors include a machine-readable [CODE] and a recovery hint — branch on it.
 
 Expo / React Native:
-- To start an Expo app, use expo_launch — it boots a simulator if needed, waits for Metro, resolves the exact deep link, and opens it in one call. Pass runtime="custom" for a dev build, "expo" for Expo Go.
+- To start an Expo app, use expo_launch — it boots a simulator if needed, waits for Metro, resolves the exact deep link, opens it, best-effort dismisses the RN/Expo development menu, and verifies render in one call. Pass runtime="custom" for a dev build, "expo" for Expo Go.
 - NEVER pass EX_UPDATES_URL or any EX_UPDATES_* env var to launch_app — it sends expo-updates into a reload loop against Metro. These keys are rejected.
 - Only fall back to launch_app/open_url if you specifically need to bypass Metro resolution.`
 

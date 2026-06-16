@@ -43,6 +43,10 @@ const SCREEN_UNCHANGED_WARNING
 const GEOMETRY_RECOVERY_WARNING
   = ' Warning: recovered screen size from the accessibility tree because baguette geometry was unavailable.'
 
+const UI_RECOVERY_HINT
+  = 'Stay within the MCP tools: call ui_snapshot/ui_inspect to re-orient, boot_sim/select_default_device for stale devices, '
+    + 'or doctor for server health. Do not fall back to shell idb/xcrun coordinate tapping.'
+
 async function fingerprint(session: WsSession): Promise<string | null> {
   try {
     return fingerprintTree(await describeUi(session))
@@ -86,6 +90,16 @@ async function resolveGestureSize(udid: string, session: WsSession): Promise<{ s
     }
     throw geometryError
   }
+}
+
+function uiErrorResult(prefix: string, error: unknown): CallToolResult {
+  const result = errorResult(prefix, error, UI_RECOVERY_HINT)
+  const block = result.content[0]
+  if (block?.type === 'text' && !block.text.includes('Do not fall back to shell idb/xcrun coordinate tapping.'))
+    block.text = `${block.text}\n\nMCP recovery: ${UI_RECOVERY_HINT}`
+  if (result.structuredContent?.error && typeof result.structuredContent.error === 'object')
+    result.structuredContent.error = { ...result.structuredContent.error, mcpRecovery: UI_RECOVERY_HINT }
+  return result
 }
 
 export interface UiTapParams {
@@ -136,7 +150,7 @@ export async function uiTapHandler({ duration, udid, x, y, ref, label, expect_ap
     }, { flushMs: GESTURE_FLUSH_MS })
   }
   catch (error) {
-    return errorResult('Error tapping on the screen', error)
+    return uiErrorResult('Error tapping on the screen', error)
   }
 }
 
@@ -167,7 +181,7 @@ export async function uiDoubleTapHandler({ udid, x, y, ref, label }: UiDoubleTap
     }, { flushMs: GESTURE_FLUSH_MS })
   }
   catch (error) {
-    return errorResult('Error double-tapping on the screen', error)
+    return uiErrorResult('Error double-tapping on the screen', error)
   }
 }
 
@@ -205,7 +219,7 @@ export async function uiTypeHandler({ udid, text, ref, label, expect_appears, ex
     }, { flushMs: GESTURE_FLUSH_MS })
   }
   catch (error) {
-    return errorResult('Error typing text into the simulator', error)
+    return uiErrorResult('Error typing text into the simulator', error)
   }
 }
 
@@ -232,7 +246,7 @@ export async function uiKeyHandler({ udid, code, modifiers, duration }: UiKeyPar
     }, { flushMs: GESTURE_FLUSH_MS })
   }
   catch (error) {
-    return errorResult('Error sending key', error)
+    return uiErrorResult('Error sending key', error)
   }
 }
 
@@ -271,7 +285,7 @@ export async function uiSwipeHandler({ duration, udid, x_start, y_start, x_end, 
     }, { flushMs: GESTURE_FLUSH_MS })
   }
   catch (error) {
-    return errorResult('Error swiping on the screen', error)
+    return uiErrorResult('Error swiping on the screen', error)
   }
 }
 
@@ -290,7 +304,7 @@ export async function uiScrollHandler({ udid, delta_x, delta_y }: UiScrollParams
     }, { flushMs: GESTURE_FLUSH_MS })
   }
   catch (error) {
-    return errorResult('Error scrolling', error)
+    return uiErrorResult('Error scrolling', error)
   }
 }
 
@@ -323,7 +337,7 @@ export async function uiPinchHandler({ udid, cx, cy, start_spread, end_spread, d
     }, { flushMs: GESTURE_FLUSH_MS })
   }
   catch (error) {
-    return errorResult('Error pinching', error)
+    return uiErrorResult('Error pinching', error)
   }
 }
 
@@ -359,7 +373,7 @@ export async function uiPanHandler({ udid, x1, y1, x2, y2, dx, dy, duration }: U
     }, { flushMs: GESTURE_FLUSH_MS })
   }
   catch (error) {
-    return errorResult('Error panning', error)
+    return uiErrorResult('Error panning', error)
   }
 }
 
@@ -392,7 +406,7 @@ export async function uiPressHandler({ udid, button, duration }: UiPressParams):
     }, { flushMs: GESTURE_FLUSH_MS })
   }
   catch (error) {
-    return errorResult('Error pressing button', error)
+    return uiErrorResult('Error pressing button', error)
   }
 }
 
@@ -422,7 +436,7 @@ export async function uiDescribePointHandler({ udid, x, y }: UiDescribePointPara
     })
   }
   catch (error) {
-    return errorResult(`Error describing point (${x}, ${y})`, error)
+    return uiErrorResult(`Error describing point (${x}, ${y})`, error)
   }
 }
 
