@@ -1,9 +1,10 @@
-import { afterEach, describe, expect, it } from 'bun:test'
+import { afterEach, describe, expect, it, jest } from 'bun:test'
 import {
   bootDevice,
   collectLogs,
   getScreenSize,
   listDevices,
+  openSession,
   resetScreenSizeCache,
   resolveBaseUrls,
   resolveBootedUdid,
@@ -83,6 +84,27 @@ class ClosingBeforeOpenWebSocket {
 
   send(_data: string): void {}
   close(): void {}
+}
+
+// Opens successfully and records close() calls, so we can prove the connect
+// deadline does not later tear down an already-open session.
+class TrackingWebSocket {
+  static instances: TrackingWebSocket[] = []
+  onopen: (() => void) | null = null
+  onerror: (() => void) | null = null
+  onclose: (() => void) | null = null
+  onmessage: ((ev: { data: string }) => void) | null = null
+  binaryType = 'arraybuffer'
+  closeCount = 0
+  constructor(_url: string) {
+    TrackingWebSocket.instances.push(this)
+    queueMicrotask(() => this.onopen?.())
+  }
+
+  send(_data: string): void {}
+  close(): void {
+    this.closeCount += 1
+  }
 }
 
 class ClosingAfterSendWebSocket {
@@ -270,6 +292,25 @@ describe('WS request/reply FIFO', () => {
     await expect(withSession('UDID', async (session) => {
       await session.request({ type: 'describe_ui' }, 'describe_ui_result', 1000)
     })).rejects.toThrow(/WebSocket closed/)
+  })
+
+  it('does not close an open session when the connect deadline elapses', async () => {
+    TrackingWebSocket.instances = []
+    globalThis.WebSocket = TrackingWebSocket as unknown as typeof WebSocket
+    jest.useFakeTimers()
+    try {
+      const session = await openSession('UDID')
+      // Advance well past WS_CONNECT_TIMEOUT_MS: the connect timer must have
+      // been cleared on open, so it must NOT close this in-use socket.
+      jest.advanceTimersByTime(30000)
+      const socket = TrackingWebSocket.instances.at(-1)!
+      expect(socket.closeCount).toBe(0)
+      session.close()
+      expect(socket.closeCount).toBe(1)
+    }
+    finally {
+      jest.useRealTimers()
+    }
   })
 })
 

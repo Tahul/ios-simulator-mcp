@@ -30,7 +30,7 @@ const RECOVERY: Partial<Record<ErrorCode, string>> = {
   STALE_REF: 'Call ui_snapshot again to refresh element refs.',
   APP_NOT_INSTALLED: 'Call list_apps to find the bundle id, or install_app first.',
   IDB_MISSING: 'Install idb — see the troubleshooting guide.',
-  COMMAND_TIMEOUT: 'The simulator or idb may be wedged. Run doctor, or restart the simulator / `idb kill`.',
+  COMMAND_TIMEOUT: 'A command timed out — the simulator may be wedged. Run doctor, or shutdown_sim then boot_sim to restart it.',
 }
 
 /** Error that carries a machine-readable code (and optional recovery hint). */

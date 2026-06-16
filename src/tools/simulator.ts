@@ -16,7 +16,7 @@ export async function getBootedSimIdHandler({ udid }: { udid?: string } = {}): P
     )
   }
   catch (error) {
-    return errorResult('Error', error)
+    return errorResult('Error getting booted simulator id', error)
   }
 }
 

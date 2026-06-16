@@ -98,21 +98,3 @@ export function resolveIdbPath(customPath = process.env.IOS_SIMULATOR_MCP_IDB_PA
 
   return expandedPath
 }
-
-let cachedIdbPath: string | undefined
-
-/**
- * Runs the idb command with the given arguments. The executable path is
- * resolved once and cached for the lifetime of the process.
- * @see https://fbidb.io/docs/commands
- */
-export function idb(...args: string[]): Promise<RunResult> {
-  cachedIdbPath ??= resolveIdbPath()
-  return run(cachedIdbPath, args)
-}
-
-/** Like idb(), but with an explicit per-call timeout. */
-export function idbWithTimeout(timeoutMs: number, ...args: string[]): Promise<RunResult> {
-  cachedIdbPath ??= resolveIdbPath()
-  return run(cachedIdbPath, args, { timeoutMs })
-}

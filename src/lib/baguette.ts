@@ -525,6 +525,8 @@ function openWs(url: string): Promise<WsSession> {
     }
 
     connectTimer = setTimeout(() => {
+      if (opened)
+        return
       closeSocket(ws)
       rejectConnect(new Error('WebSocket connect timed out'))
     }, WS_CONNECT_TIMEOUT_MS)
@@ -532,6 +534,10 @@ function openWs(url: string): Promise<WsSession> {
     ws.onopen = () => {
       opened = true
       settledConnect = true
+      // Clear the connect deadline; without this it later fires and closes
+      // THIS still-in-use socket, breaking long-lived sessions (e.g.
+      // wait_for_element, or any tap flow that runs past WS_CONNECT_TIMEOUT_MS).
+      clearTimeout(connectTimer)
       resolve(session)
     }
 
