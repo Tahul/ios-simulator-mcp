@@ -1,7 +1,7 @@
 import type { AxNode } from '../src/lib/ax'
 import type { RunResult } from '../src/lib/run'
 import { afterEach, describe, expect, it, mock } from 'bun:test'
-import { setWsSessionFactory } from '../src/lib/baguette'
+import { setLogCollector, setWsSessionFactory } from '../src/lib/baguette'
 import { setRunner } from '../src/lib/run'
 import { expoLaunchHandler } from '../src/tools/expo'
 import { makeMockSession } from './helpers/baguette-mock'
@@ -47,6 +47,7 @@ function text(result: { content: Array<{ type: string, text?: string }> }): stri
 const realFetch = globalThis.fetch
 
 afterEach(() => {
+  setLogCollector(null)
   setRunner(null)
   setWsSessionFactory(null)
   globalThis.fetch = realFetch
@@ -181,11 +182,52 @@ describe('expo_launch', () => {
     expect(calls.some(c => c.args.includes('terminate'))).toBe(false)
   })
 
+  it('includes simulator logs when opening the deep link fails', async () => {
+    setRunner((_cmd, args): Promise<RunResult> => {
+      if (args.includes('list'))
+        return Promise.resolve({ stdout: BOOTED, stderr: '' })
+      if (args[0] === '-a')
+        return Promise.resolve({ stdout: '', stderr: '' })
+      if (args.includes('openurl'))
+        throw new Error('openurl failed')
+      return Promise.resolve({ stdout: '', stderr: '' })
+    })
+    setLogCollector((udid, opts) => {
+      expect(udid).toBe('AAA')
+      expect(opts.bundleId).toBe('host.exp.Exponent')
+      return Promise.resolve(['host.exp.Exponent: unable to load bundle'])
+    })
+
+    globalThis.fetch = mock(async (url: string | URL) => {
+      const u = url.toString()
+      if (u.includes('/_expo/open'))
+        return { ok: true, json: async () => ({ url: 'exp://localhost:8081', runtime: 'expo' }) } as Response
+      return { ok: true } as Response
+    }) as unknown as typeof fetch
+
+    const result = await expoLaunchHandler({ udid: 'AAA', runtime: 'expo', clean: false })
+
+    expect(result.isError).toBe(true)
+    const out = text(result)
+    expect(out).toContain('Simulator logs captured after failure for host.exp.Exponent')
+    expect(out).toContain('unable to load bundle')
+    expect(result.structuredContent?.recentLogs).toEqual({
+      udid: 'AAA',
+      bundleId: 'host.exp.Exponent',
+      lines: ['host.exp.Exponent: unable to load bundle'],
+      totalLines: 1,
+      truncated: false,
+    })
+  })
+
   it('fails clearly when Metro never responds', async () => {
     setRunner((_cmd, args) => {
       if (args.includes('list'))
         return Promise.resolve({ stdout: BOOTED, stderr: '' })
       return Promise.resolve({ stdout: '', stderr: '' })
+    })
+    setLogCollector(() => {
+      throw new Error('logs should not be collected before app open')
     })
 
     globalThis.fetch = mock(async () => {
@@ -199,6 +241,7 @@ describe('expo_launch', () => {
     expect(out).toContain('simulator ready: iPhone 17 Pro')
     expect(out).toContain('not responding')
     expect(out).toContain('Hint:')
+    expect(result.structuredContent?.recentLogs).toBeUndefined()
   })
 
   it('skips the Metro wait but still resolves via construction fallback', async () => {

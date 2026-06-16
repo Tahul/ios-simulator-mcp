@@ -3,6 +3,7 @@ import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
 import { z } from 'zod'
 import { isToolFiltered } from '../lib/constants'
 import { ensureBooted } from '../lib/devices'
+import { errorResultWithLogs } from '../lib/error-logs'
 import { errorResult, textResult } from '../lib/errors'
 import {
   normalizeMetroUrl,
@@ -140,11 +141,15 @@ export async function expoLaunchHandler({
   verify_timeout_s = 20,
 }: ExpoLaunchParams): Promise<CallToolResult> {
   const steps: string[] = []
+  let actualUdid = udid
+  let logBundleId = bundle_id
+  let attemptedAppOpen = false
   try {
     const metroUrl = normalizeMetroUrl(metro_url ?? DEFAULT_METRO_URL)
 
     // 1. Simulator ready
     const { device, alreadyBooted } = await ensureBooted({ udid, name: device_name })
+    actualUdid = device.udid
     steps.push(alreadyBooted
       ? `simulator ready: ${device.name}`
       : `booted simulator: ${device.name}`)
@@ -165,6 +170,7 @@ export async function expoLaunchHandler({
 
     // 3. Resolve the exact deep link
     const link = await resolveDeepLink({ metroUrl, runtime, scheme })
+    logBundleId = bundle_id ?? (link.runtime === 'expo' ? EXPO_GO_BUNDLE_ID : undefined)
     const finalUrl = withDisableOnboarding(link)
     steps.push(`resolved ${link.runtime} link via ${link.source}`)
 
@@ -189,6 +195,7 @@ export async function expoLaunchHandler({
     }
 
     // 4. Open it
+    attemptedAppOpen = true
     await run('xcrun', ['simctl', 'openurl', device.udid, '--', finalUrl])
     steps.push('opened deep link')
 
@@ -224,11 +231,24 @@ export async function expoLaunchHandler({
     )
   }
   catch (error) {
-    return errorResult(
+    if (!attemptedAppOpen) {
+      return errorResult(
+        `Error launching Expo app (completed: ${steps.join(' -> ') || 'none'})`,
+        error,
+        'Verify Metro is running (`npx expo start`), the dev build/Expo Go is installed on the simulator, '
+        + 'and for a dev client pass runtime="custom". For a specific Metro instance set metro_url.',
+      )
+    }
+
+    return errorResultWithLogs(
       `Error launching Expo app (completed: ${steps.join(' -> ') || 'none'})`,
       error,
-      'Verify Metro is running (`npx expo start`), the dev build/Expo Go is installed on the simulator, '
-      + 'and for a dev client pass runtime="custom". For a specific Metro instance set metro_url.',
+      {
+        udid: actualUdid,
+        bundleId: logBundleId,
+        hint: 'Verify Metro is running (`npx expo start`), the dev build/Expo Go is installed on the simulator, '
+          + 'and for a dev client pass runtime="custom". For a specific Metro instance set metro_url.',
+      },
     )
   }
 }

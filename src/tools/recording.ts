@@ -25,7 +25,10 @@ export interface RecordingProcess {
 
 export type Spawner = (cmd: string, args: string[]) => RecordingProcess
 
-const defaultSpawner: Spawner = (cmd, args) => spawn(cmd, args)
+const defaultSpawner: Spawner = (cmd, args) => spawn(cmd, args, {
+  // stdout is the MCP JSON-RPC channel; child output must never inherit it.
+  stdio: ['ignore', 'ignore', 'pipe'],
+})
 
 let currentSpawner: Spawner = defaultSpawner
 

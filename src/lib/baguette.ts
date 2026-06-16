@@ -12,7 +12,7 @@ import { ToolError } from './errors'
  *   ack gestures — only describe_ui/snapshot get a reply — so callers verify
  *   effects with a follow-up describe_ui or screenshot.
  *
- * If no server is reachable, every call fails fast with a METRO_UNREACHABLE
+ * If no server is reachable, every call fails fast with a BAGUETTE_UNREACHABLE
  * ToolError pointing the user at `baguette serve` / BAGUETTE_URL.
  */
 
@@ -125,7 +125,7 @@ async function httpFetch(
   throw new ToolError(
     `Could not reach a baguette server at any of: ${bases.join(', ')}. `
     + `Start one with \`baguette serve\` or set BAGUETTE_URL. (${(lastError as Error)?.message ?? 'unknown error'})`,
-    'METRO_UNREACHABLE',
+    'BAGUETTE_UNREACHABLE',
   )
 }
 
@@ -188,6 +188,14 @@ export async function resolveBootedUdid(explicit?: string): Promise<string> {
   const { running } = await listDevices()
   if (running.length === 0)
     throw new ToolError('No booted simulator found. Boot one with boot_sim.', 'NO_BOOTED_SIM')
+  if (running.length > 1) {
+    const choices = running.map(d => `${d.name} (${d.udid})`).join(', ')
+    throw new ToolError(
+      `Multiple booted simulators found: ${choices}.`,
+      'INVALID_ARGUMENT',
+      'Pass udid explicitly, or call select_default_device once for this session.',
+    )
+  }
   return running[0]!.udid
 }
 
@@ -359,7 +367,7 @@ export async function captureScreenshot(udid: string, opts: { quality?: number, 
   }
   throw new ToolError(
     `Could not reach a baguette server for screenshot (${(lastError as Error)?.message ?? 'unknown'})`,
-    'METRO_UNREACHABLE',
+    'BAGUETTE_UNREACHABLE',
   )
 }
 
@@ -390,6 +398,36 @@ function toWsUrl(base: string, udid: string): string {
   })}`
 }
 
+async function streamOpenError(udid: string, bases: string[], lastError: unknown): Promise<ToolError> {
+  try {
+    const { running } = await listDevices()
+    if (running.length === 0) {
+      return new ToolError(
+        `Could not open a baguette stream for ${udid}: no simulator is booted.`,
+        'NO_BOOTED_SIM',
+      )
+    }
+    if (!running.some(d => d.udid === udid)) {
+      const choices = running.map(d => `${d.name} (${d.udid})`).join(', ')
+      return new ToolError(
+        `Could not open a baguette stream for ${udid}: that simulator is not booted. Booted simulators: ${choices}.`,
+        'DEVICE_NOT_FOUND',
+        'Use get_booted_sim_id, pass a booted udid, or call boot_sim/select_default_device.',
+      )
+    }
+  }
+  catch {
+    // If even the device list is unreachable, the baguette server itself is the
+    // failure; report that instead of leaking a low-level WebSocket error.
+  }
+
+  return new ToolError(
+    `Could not open a baguette stream for ${udid} at: ${bases.join(', ')} `
+    + `(${(lastError as Error)?.message ?? 'unknown'})`,
+    'BAGUETTE_UNREACHABLE',
+  )
+}
+
 /** Default WS session over the global WebSocket, racing candidate base URLs. */
 const defaultWsSessionFactory: WsSessionFactory = async (udid) => {
   const bases = resolveBaseUrls()
@@ -403,11 +441,7 @@ const defaultWsSessionFactory: WsSessionFactory = async (udid) => {
       lastError = error
     }
   }
-  throw new ToolError(
-    `Could not open a baguette stream for ${udid} at: ${bases.join(', ')} `
-    + `(${(lastError as Error)?.message ?? 'unknown'})`,
-    'METRO_UNREACHABLE',
-  )
+  throw await streamOpenError(udid, bases, lastError)
 }
 
 interface PendingRequest {
@@ -595,7 +629,7 @@ export function collectLogs(udid: string, opts: LogOptions = {}): Promise<string
 
     const tryBase = (i: number): void => {
       if (i >= bases.length) {
-        reject(new ToolError(`Could not reach a baguette server for logs at: ${bases.join(', ')}`, 'METRO_UNREACHABLE'))
+        reject(new ToolError(`Could not reach a baguette server for logs at: ${bases.join(', ')}`, 'BAGUETTE_UNREACHABLE'))
         return
       }
       const socket = new WebSocket(logWsUrl(bases[i]!, udid, opts))

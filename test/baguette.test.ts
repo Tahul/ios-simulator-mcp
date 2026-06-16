@@ -159,6 +159,20 @@ describe('resolveBootedUdid', () => {
     stub(() => ({ body: JSON.stringify({ running: [], available: [] }) }))
     expect(resolveBootedUdid()).rejects.toThrow(/No booted simulator/)
   })
+
+  it('requires an explicit/default target when multiple simulators are booted', async () => {
+    stub(() => ({
+      body: JSON.stringify({
+        running: [
+          { udid: 'A', name: 'iPhone 17 Pro', runtime: 'iOS', state: 'Booted' },
+          { udid: 'B', name: 'iPhone 17', runtime: 'iOS', state: 'Booted' },
+        ],
+        available: [],
+      }),
+    }))
+
+    await expect(resolveBootedUdid()).rejects.toThrow(/Multiple booted simulators/)
+  })
 })
 
 describe('bootDevice', () => {
@@ -233,6 +247,20 @@ describe('WS request/reply FIFO', () => {
     globalThis.WebSocket = ClosingBeforeOpenWebSocket as unknown as typeof WebSocket
 
     await expect(withSession('UDID', async () => {})).rejects.toThrow(/closed before opening/)
+  })
+
+  it('diagnoses a stale stream UDID before surfacing the WebSocket error', async () => {
+    globalThis.WebSocket = ClosingBeforeOpenWebSocket as unknown as typeof WebSocket
+    stub(url => url.endsWith('/simulators.json')
+      ? {
+          body: JSON.stringify({
+            running: [{ udid: 'BOOTED', name: 'iPhone 17 Pro', runtime: 'iOS', state: 'Booted' }],
+            available: [],
+          }),
+        }
+      : { status: 404 })
+
+    await expect(withSession('STALE', async () => {})).rejects.toThrow(/that simulator is not booted/)
   })
 
   it('rejects pending requests when the stream closes after opening', async () => {

@@ -9,6 +9,7 @@ const TROUBLESHOOTING_URL = 'https://github.com/Tahul/ios-simulator-mcp/blob/mai
 export type ErrorCode
   = | 'NO_BOOTED_SIM'
     | 'DEVICE_NOT_FOUND'
+    | 'BAGUETTE_UNREACHABLE'
     | 'METRO_UNREACHABLE'
     | 'ELEMENT_NOT_FOUND'
     | 'STALE_REF'
@@ -23,6 +24,7 @@ export type ErrorCode
 const RECOVERY: Partial<Record<ErrorCode, string>> = {
   NO_BOOTED_SIM: 'Call boot_sim (or expo_launch, which boots automatically).',
   DEVICE_NOT_FOUND: 'Call doctor or boot_sim to see available simulators.',
+  BAGUETTE_UNREACHABLE: 'Start `baguette serve`, or set BAGUETTE_URL/BAGUETTE_TOKEN.',
   METRO_UNREACHABLE: 'Start Metro with `npx expo start`, or pass metro_url.',
   ELEMENT_NOT_FOUND: 'Call ui_snapshot to see the current screen.',
   STALE_REF: 'Call ui_snapshot again to refresh element refs.',
@@ -77,6 +79,8 @@ export function inferErrorCode(message: string): ErrorCode {
     return 'IDB_MISSING'
   if (m.includes('unable to find') || m.includes('no devices') || m.includes('invalid device') || m.includes('not found in device set'))
     return 'DEVICE_NOT_FOUND'
+  if (m.includes('baguette'))
+    return 'BAGUETTE_UNREACHABLE'
   if (m.includes('not responding') || m.includes('metro') || m.includes('econnrefused'))
     return 'METRO_UNREACHABLE'
   if (m.includes('no on-screen element') || m.includes('did not appear'))

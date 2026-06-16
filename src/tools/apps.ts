@@ -5,6 +5,7 @@ import path from 'node:path'
 import { z } from 'zod'
 import { isToolFiltered, udidSchema } from '../lib/constants'
 import { getBootedDeviceId } from '../lib/devices'
+import { errorResultWithLogs } from '../lib/error-logs'
 import { errorResult, textResult } from '../lib/errors'
 import { run } from '../lib/run'
 
@@ -136,8 +137,10 @@ export interface LaunchAppParams {
 }
 
 export async function launchAppHandler({ udid, bundle_id, terminate_running, env }: LaunchAppParams): Promise<CallToolResult> {
+  let actualUdid = udid
+  let attemptedLaunch = false
   try {
-    const actualUdid = await getBootedDeviceId(udid)
+    actualUdid = await getBootedDeviceId(udid)
 
     const { args, env: simctlEnv } = buildLaunchArgs({
       udid: actualUdid,
@@ -146,6 +149,7 @@ export async function launchAppHandler({ udid, bundle_id, terminate_running, env
       env,
     })
 
+    attemptedLaunch = true
     const { stdout } = await run('xcrun', ['simctl', ...args], {
       env: simctlEnv,
     })
@@ -161,10 +165,22 @@ export async function launchAppHandler({ udid, bundle_id, terminate_running, env
     )
   }
   catch (error) {
-    return errorResult(
+    if (!attemptedLaunch) {
+      return errorResult(
+        'Error launching app',
+        error,
+        'If the app is not installed, call list_apps to see installed bundle identifiers, or install_app first.',
+      )
+    }
+
+    return errorResultWithLogs(
       'Error launching app',
       error,
-      'If the app is not installed, call list_apps to see installed bundle identifiers, or install_app first.',
+      {
+        udid: actualUdid,
+        bundleId: bundle_id,
+        hint: 'If the app is not installed, call list_apps to see installed bundle identifiers, or install_app first.',
+      },
     )
   }
 }

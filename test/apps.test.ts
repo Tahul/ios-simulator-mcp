@@ -1,10 +1,12 @@
 import { afterEach, describe, expect, it } from 'bun:test'
+import { setLogCollector } from '../src/lib/baguette'
 import { setRunner } from '../src/lib/run'
-import { buildLaunchArgs, listAppsHandler, parseListApps, terminateAppHandler, uninstallAppHandler } from '../src/tools/apps'
+import { buildLaunchArgs, launchAppHandler, listAppsHandler, parseListApps, terminateAppHandler, uninstallAppHandler } from '../src/tools/apps'
 
 const UDID = '37A360EC-75F9-4AEC-8EFA-10F4A58D8CCA'
 
 afterEach(() => {
+  setLogCollector(null)
   setRunner(null)
 })
 
@@ -87,6 +89,54 @@ describe('list_apps handler', () => {
     expect(result.isError).toBe(false)
     const block = result.content[0]
     expect(block?.type === 'text' && block.text).toContain('com.tahul.spotter — Spotter (User)')
+  })
+})
+
+describe('launch_app handler', () => {
+  it('does not collect logs for pre-launch validation failures', async () => {
+    setRunner(() => {
+      throw new Error('runner should not be called')
+    })
+    setLogCollector(() => {
+      throw new Error('logs should not be collected')
+    })
+
+    const result = await launchAppHandler({
+      udid: UDID,
+      bundle_id: 'com.example.app',
+      env: { EX_UPDATES_URL: 'http://localhost:8081' },
+    })
+
+    expect(result.isError).toBe(true)
+    expect(result.structuredContent?.recentLogs).toBeUndefined()
+  })
+
+  it('includes bounded simulator logs when launch fails', async () => {
+    setRunner((_cmd, args) => {
+      expect(args).toEqual(['simctl', 'launch', UDID, 'com.example.app'])
+      throw new Error('launch failed')
+    })
+    setLogCollector((udid, opts) => {
+      expect(udid).toBe(UDID)
+      expect(opts.bundleId).toBe('com.example.app')
+      expect(opts.maxLines).toBe(80)
+      expect(opts.windowMs).toBe(1000)
+      return Promise.resolve(['com.example.app: fatal JS exception'])
+    })
+
+    const result = await launchAppHandler({ udid: UDID, bundle_id: 'com.example.app' })
+
+    expect(result.isError).toBe(true)
+    const block = result.content[0]
+    expect(block?.type === 'text' && block.text).toContain('Simulator logs captured after failure for com.example.app')
+    expect(block?.type === 'text' && block.text).toContain('fatal JS exception')
+    expect(result.structuredContent?.recentLogs).toEqual({
+      udid: UDID,
+      bundleId: 'com.example.app',
+      lines: ['com.example.app: fatal JS exception'],
+      totalLines: 1,
+      truncated: false,
+    })
   })
 })
 
