@@ -1,13 +1,33 @@
 import { afterEach, describe, expect, it } from 'bun:test'
 import { setLogCollector } from '../src/lib/baguette'
 import { setRunner } from '../src/lib/run'
-import { buildLaunchArgs, launchAppHandler, listAppsHandler, parseListApps, terminateAppHandler, uninstallAppHandler } from '../src/tools/apps'
+import { buildLaunchArgs, launchAppHandler, listAppsHandler, parseAppRunning, parseListApps, terminateAppHandler, uninstallAppHandler } from '../src/tools/apps'
 
 const UDID = '37A360EC-75F9-4AEC-8EFA-10F4A58D8CCA'
 
 afterEach(() => {
   setLogCollector(null)
   setRunner(null)
+})
+
+describe('parseAppRunning', () => {
+  const LINE = '40509\t0\tUIKitApplication:com.tahul.spotter[93a2][rb-legacy]'
+
+  it('returns true when the bundle has a numeric pid', () => {
+    expect(parseAppRunning(LINE, 'com.tahul.spotter')).toBe(true)
+  })
+
+  it('returns false when registered but not running (pid "-")', () => {
+    expect(parseAppRunning('-\t0\tUIKitApplication:com.tahul.spotter[93a2]', 'com.tahul.spotter')).toBe(false)
+  })
+
+  it('returns false when the bundle is absent', () => {
+    expect(parseAppRunning('40509\t0\tUIKitApplication:com.apple.mobilesafari[aa]', 'com.tahul.spotter')).toBe(false)
+  })
+
+  it('does not match a bundle that is only a prefix of another', () => {
+    expect(parseAppRunning('40509\t0\tUIKitApplication:com.tahul.spotter2[aa]', 'com.tahul.spotter')).toBe(false)
+  })
 })
 
 describe('buildLaunchArgs EX_UPDATES guard', () => {

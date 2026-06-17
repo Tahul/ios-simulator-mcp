@@ -14,6 +14,7 @@ import {
   withDisableOnboarding,
 } from '../lib/metro'
 import { run } from '../lib/run'
+import { isAppRunning } from './apps'
 import { describeTree } from './snapshot'
 
 export interface ExpoLaunchParams {
@@ -28,6 +29,7 @@ export interface ExpoLaunchParams {
   bundle_id?: string
   verify?: boolean
   verify_timeout_s?: number
+  if_running?: 'reuse' | 'restart'
 }
 
 const DEFAULT_METRO_URL = 'http://localhost:8081'
@@ -212,6 +214,7 @@ export async function expoLaunchHandler({
   bundle_id,
   verify = true,
   verify_timeout_s = 20,
+  if_running = 'reuse',
 }: ExpoLaunchParams): Promise<CallToolResult> {
   const steps: string[] = []
   let actualUdid = udid
@@ -247,30 +250,48 @@ export async function expoLaunchHandler({
     const finalUrl = withDisableOnboarding(link)
     steps.push(`resolved ${link.runtime} link via ${link.source}`)
 
-    // 3b. Cold start: terminate the host app so no stale JS state or
-    // leftover error overlay carries into the new session. Best-effort —
-    // terminating an app that isn't running is not an error here.
-    if (clean) {
-      const cleanTarget = resolveCleanBundleId(link, bundle_id)
-      if (cleanTarget) {
-        try {
-          await run('xcrun', ['simctl', 'terminate', device.udid, cleanTarget])
-          steps.push(`terminated ${cleanTarget} for clean start`)
-        }
-        catch {
-          // app wasn't running — already clean
-          steps.push(`clean start: ${cleanTarget} not running`)
-        }
-      }
-      else {
-        steps.push('clean start: skipped (pass bundle_id for a dev client)')
-      }
-    }
+    // 3b. Reuse vs. cold start. The bundle that represents this app (explicit
+    // bundle_id, or Expo Go for the expo runtime) is what we both check for
+    // "already running" and terminate for a clean start.
+    const appBundle = resolveCleanBundleId(link, bundle_id)
+    const reusing = if_running === 'reuse'
+      && appBundle != null
+      && await isAppRunning(device.udid, appBundle)
 
-    // 4. Open it
-    attemptedAppOpen = true
-    await run('xcrun', ['simctl', 'openurl', device.udid, '--', finalUrl])
-    steps.push('opened deep link')
+    if (reusing) {
+      // Foreground the live app without re-opening the deep link: `simctl
+      // launch` (no --terminate-running-process) returns the existing pid and
+      // brings it forward — so we never cold-reboot an app the user is using.
+      attemptedAppOpen = true
+      await run('xcrun', ['simctl', 'launch', device.udid, appBundle!])
+      steps.push(`reused running ${appBundle} (no cold start)`)
+    }
+    else {
+      // Cold start: terminate the host app so no stale JS state or leftover
+      // error overlay carries into the new session. Best-effort — terminating
+      // an app that isn't running is not an error here.
+      if (clean) {
+        if (appBundle) {
+          try {
+            await run('xcrun', ['simctl', 'terminate', device.udid, appBundle])
+            steps.push(`terminated ${appBundle} for clean start`)
+          }
+          catch {
+            // app wasn't running — already clean
+            steps.push(`clean start: ${appBundle} not running`)
+          }
+        }
+        else {
+          steps.push('clean start: skipped (pass bundle_id for a dev client)')
+        }
+      }
+
+      // Open it. NOTE: `simctl openurl` takes `<device> <URL>` with NO `--`
+      // separator — passing `--` makes simctl open the literal "--" (-50).
+      attemptedAppOpen = true
+      await run('xcrun', ['simctl', 'openurl', device.udid, finalUrl])
+      steps.push('opened deep link')
+    }
 
     const devMenuDismissal = await dismissDevelopmentMenu(device.udid)
     if (devMenuDismissal?.dismissed)
@@ -283,27 +304,32 @@ export async function expoLaunchHandler({
       steps.push(`verify: ${verification.outcome}`)
     }
 
-    const headline = verification?.outcome === 'redbox'
-      ? `Expo launch opened but the app shows an error on ${device.name}.`
-      : verification?.outcome === 'unconfirmed'
-        ? `Expo launch opened on ${device.name} but could not confirm the app loaded.`
-        : `Expo launch succeeded on ${device.name} (${device.udid}).`
+    const headline = reusing
+      ? `Expo app already running on ${device.name} — reused without restart.`
+      : verification?.outcome === 'redbox'
+        ? `Expo launch opened but the app shows an error on ${device.name}.`
+        : verification?.outcome === 'unconfirmed'
+          ? `Expo launch opened on ${device.name} but could not confirm the app loaded.`
+          : `Expo launch succeeded on ${device.name} (${device.udid}).`
 
     const reportLines = [
       headline,
-      `Deep link: ${finalUrl}`,
+      ...(reusing ? [] : [`Deep link: ${finalUrl}`]),
       `Steps: ${steps.join(' -> ')}`,
       ...(verification ? [`Verification: ${verification.detail}`] : []),
-      'If the app misbehaves, check app_logs (process is your app/Expo Go) for details.',
+      reusing
+        ? 'Pass if_running="restart" to force a fresh launch against metro_url.'
+        : 'If the app misbehaves, check app_logs (process is your app/Expo Go) for details.',
     ]
 
     return textResult(
       reportLines.join('\n'),
       {
         udid: device.udid,
-        deepLink: finalUrl,
+        deepLink: reusing ? null : finalUrl,
         runtime: link.runtime,
-        outcome: verification?.outcome ?? 'opened',
+        reused: reusing,
+        outcome: verification?.outcome ?? (reusing ? 'reused' : 'opened'),
       },
     )
   }
@@ -340,9 +366,11 @@ export function registerExpoTools(server: McpServer): void {
     + 'ready, waits for the Metro dev server, asks Metro for the exact deep link (dev client or Expo Go — no scheme '
     + 'guessing), and opens it. This is the preferred way to start an Expo app: it is deterministic and never uses '
     + 'EX_UPDATES_* env vars. Use runtime="custom" to force a development build, "expo" to force Expo Go. '
-    + 'By default does a clean (cold) start by terminating the host app first so no stale JS state or error overlay '
-    + 'carries over; for a dev client pass bundle_id so it knows which app to terminate. After opening, it best-effort '
-    + 'dismisses any React Native/Expo development menu before verification. Defaults to Metro at http://localhost:8081.',
+    + 'By default (if_running="reuse") it does NOT reboot an app that is already running — it just foregrounds it, so '
+    + 'repeated calls are safe and do not restart your session. Pass if_running="restart" to force a fresh launch. When '
+    + 'it does launch, clean=true cold-starts by terminating the host app first; for a dev client pass bundle_id so it '
+    + 'knows which app to reuse/terminate. After opening, it best-effort dismisses any React Native/Expo development menu '
+    + 'before verification. Defaults to Metro at http://localhost:8081.',
     {
       udid: z.string().optional().describe('Specific simulator UDID (default: booted, else first available)'),
       device_name: z.string().optional().describe('Boot/select a simulator by name (e.g. "iPhone 17 Pro")'),
@@ -358,10 +386,14 @@ export function registerExpoTools(server: McpServer): void {
         .describe('Project URL scheme (e.g. exp+your-slug), only used if Metro cannot be reached to resolve it'),
       wait_for_metro: z.boolean().optional().describe('Wait for the Metro dev server before opening (default true)'),
       metro_timeout_s: z.number().min(1).max(180).optional().describe('Seconds to wait for Metro (default 30)'),
+      if_running: z
+        .enum(['reuse', 'restart'])
+        .optional()
+        .describe('"reuse" (default): if the app is already running, foreground it without restarting. "restart": always relaunch via the deep link. Reuse needs bundle_id for a dev client.'),
       clean: z
         .boolean()
         .optional()
-        .describe('Cold start: terminate the host app before opening so no stale state/overlay carries over (default true)'),
+        .describe('When launching (not reusing), cold start by terminating the host app first so no stale state/overlay carries over (default true)'),
       bundle_id: z
         .string()
         .max(256)

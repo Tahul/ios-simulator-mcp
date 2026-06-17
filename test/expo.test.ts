@@ -236,6 +236,64 @@ describe('expo_launch', () => {
     expect(calls.some(c => c.args.includes('terminate') && c.args.includes('com.tahul.spotter'))).toBe(true)
   })
 
+  it('reuses an already-running app instead of cold-restarting it', async () => {
+    const calls: RecordedCall[] = []
+    setRunner((cmd, args) => {
+      calls.push({ cmd, args })
+      // launchctl probe reports the dev client as running (numeric pid).
+      if (args.includes('launchctl') && args.includes('list'))
+        return Promise.resolve({ stdout: '40509\t0\tUIKitApplication:com.tahul.spotter[93a2][rb-legacy]', stderr: '' })
+      if (args.includes('list') && args.includes('devices'))
+        return Promise.resolve({ stdout: BOOTED, stderr: '' })
+      return Promise.resolve({ stdout: '', stderr: '' })
+    })
+    setWsSessionFactory(() => Promise.resolve(makeMockSession(() => LOADED_TREE)))
+
+    globalThis.fetch = mock(async (url: string | URL) => {
+      const u = url.toString()
+      if (u.includes('/_expo/open'))
+        return { ok: true, json: async () => ({ url: 'exp+spotter://expo-development-client/?url=enc', runtime: 'custom' }) } as Response
+      return { ok: true } as Response
+    }) as unknown as typeof fetch
+
+    const result = await expoLaunchHandler({ udid: 'AAA', bundle_id: 'com.tahul.spotter', verify: false })
+
+    expect(result.isError).toBe(false)
+    // Reuse path: no reboot — no terminate, no deep-link re-open.
+    expect(calls.some(c => c.args.includes('terminate'))).toBe(false)
+    expect(calls.some(c => c.args.includes('openurl'))).toBe(false)
+    // Just a foreground launch of the running bundle.
+    expect(calls.some(c => c.args.includes('launch') && c.args.includes('com.tahul.spotter'))).toBe(true)
+    expect(text(result)).toContain('reused running')
+    expect((result.structuredContent as { reused: boolean }).reused).toBe(true)
+  })
+
+  it('restarts via the deep link when if_running="restart", even if running', async () => {
+    const calls: RecordedCall[] = []
+    setRunner((cmd, args) => {
+      calls.push({ cmd, args })
+      if (args.includes('launchctl') && args.includes('list'))
+        return Promise.resolve({ stdout: '40509\t0\tUIKitApplication:com.tahul.spotter[aa]', stderr: '' })
+      if (args.includes('list') && args.includes('devices'))
+        return Promise.resolve({ stdout: BOOTED, stderr: '' })
+      return Promise.resolve({ stdout: '', stderr: '' })
+    })
+    setWsSessionFactory(() => Promise.resolve(makeMockSession(() => LOADED_TREE)))
+
+    globalThis.fetch = mock(async (url: string | URL) => {
+      const u = url.toString()
+      if (u.includes('/_expo/open'))
+        return { ok: true, json: async () => ({ url: 'exp+spotter://expo-development-client/?url=enc', runtime: 'custom' }) } as Response
+      return { ok: true } as Response
+    }) as unknown as typeof fetch
+
+    const result = await expoLaunchHandler({ udid: 'AAA', bundle_id: 'com.tahul.spotter', if_running: 'restart', verify: false })
+
+    expect(result.isError).toBe(false)
+    expect(calls.some(c => c.args.includes('openurl'))).toBe(true)
+    expect(calls.some(c => c.args.includes('terminate') && c.args.includes('com.tahul.spotter'))).toBe(true)
+  })
+
   it('does not terminate anything when clean is false', async () => {
     const calls: RecordedCall[] = []
     setRunner((cmd, args) => {

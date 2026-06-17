@@ -110,6 +110,44 @@ export function parseListApps(output: string): InstalledApp[] {
   return apps
 }
 
+/**
+ * True if `launchctl list` shows the app's UIKitApplication service with a
+ * numeric PID (running), as opposed to "-" (registered but not running) or
+ * absent. Matches the bundle id exactly (label is `UIKitApplication:<id>[...]`).
+ */
+export function parseAppRunning(launchctlOutput: string, bundleId: string): boolean {
+  const needle = `UIKitApplication:${bundleId}`
+  for (const line of launchctlOutput.split('\n')) {
+    const idx = line.indexOf(needle)
+    if (idx === -1)
+      continue
+    // Guard against prefix collisions (com.foo vs com.foobar): the label must
+    // end at the bundle id or continue with the instance suffix "[".
+    const after = line[idx + needle.length]
+    if (after !== undefined && after !== '[')
+      continue
+    const pid = line.trim().split(/\s+/)[0]
+    if (pid && /^\d+$/.test(pid))
+      return true
+  }
+  return false
+}
+
+/**
+ * Best-effort check of whether an app is currently running on the simulator.
+ * Returns false (never throws) when the state cannot be determined, so callers
+ * fall back to a normal launch rather than blocking.
+ */
+export async function isAppRunning(udid: string, bundleId: string): Promise<boolean> {
+  try {
+    const { stdout } = await run('xcrun', ['simctl', 'spawn', udid, 'launchctl', 'list'])
+    return parseAppRunning(stdout, bundleId)
+  }
+  catch {
+    return false
+  }
+}
+
 export async function installAppHandler({ udid, app_path }: { udid?: string, app_path: string }): Promise<CallToolResult> {
   try {
     const actualUdid = await getBootedDeviceId(udid)

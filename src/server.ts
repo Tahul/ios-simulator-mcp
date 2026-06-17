@@ -31,11 +31,12 @@ Workflow:
 - If an input tool fails, recover with MCP tools (ui_snapshot/ui_inspect, boot_sim/select_default_device, doctor). Do NOT switch to shell idb/xcrun coordinate tapping; it bypasses refs, warnings, and recovery.
 - After an async load (launch, network navigation), use wait_for_element instead of sleeping and re-describing.
 - Debug with app_logs (JS errors, RedBox, native crashes) — do not rely on screenshots alone. Find bundle ids with list_apps; reset an app with reset_app.
+- App lifecycle is reuse-first: expo_launch/launch_app foreground a running app WITHOUT rebooting it (pass if_running="restart" or terminate_running to force one). To interact with a running app use ui_* tools, not open_url. set_permissions restarts the target app to apply TCC, so set it before launching. set_appearance/set_orientation/status_bar/set_location/push_notification and every read/input tool never restart the app; terminate_app/uninstall_app/reset_app/shutdown_sim are the only intentionally destructive ones.
 - Screenshots/AX need a frame: an idle simulator may emit nothing — send a gesture (e.g. ui_press home) to wake it, then retry.
 - Errors include a machine-readable [CODE] and a recovery hint — branch on it.
 
 Expo / React Native:
-- To start an Expo app, use expo_launch — it boots a simulator if needed, waits for Metro, resolves the exact deep link, opens it, best-effort dismisses the RN/Expo development menu, and verifies render in one call. Pass runtime="custom" for a dev build, "expo" for Expo Go.
+- To start an Expo app, use expo_launch — it boots a simulator if needed, waits for Metro, resolves the exact deep link, opens it, best-effort dismisses the RN/Expo development menu, and verifies render in one call. Pass runtime="custom" for a dev build, "expo" for Expo Go. It is reuse-by-default: re-calling it does NOT reboot an already-running app (it foregrounds it); pass if_running="restart" to force a fresh launch.
 - NEVER pass EX_UPDATES_URL or any EX_UPDATES_* env var to launch_app — it sends expo-updates into a reload loop against Metro. These keys are rejected.
 - Only fall back to launch_app/open_url if you specifically need to bypass Metro resolution.`
 

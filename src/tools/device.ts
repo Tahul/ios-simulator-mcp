@@ -5,7 +5,7 @@ import path from 'node:path'
 import { z } from 'zod'
 import { isToolFiltered, udidSchema } from '../lib/constants'
 import { getBootedDeviceId } from '../lib/devices'
-import { errorResult, textResult } from '../lib/errors'
+import { errorResult, textResult, ToolError } from '../lib/errors'
 import { getTmpRoot } from '../lib/paths'
 import { run } from '../lib/run'
 
@@ -28,8 +28,14 @@ const PRIVACY_SERVICES = [
 
 export async function openUrlHandler({ udid, url }: { udid?: string, url: string }): Promise<CallToolResult> {
   try {
+    // `simctl openurl` is `<device> <URL>` with NO `--` separator (passing one
+    // makes simctl open the literal "--"). A real URL starts with a scheme, so
+    // reject a leading "-" — the only input that could be read as a flag.
+    if (url.startsWith('-'))
+      throw new ToolError('URL must start with a scheme (e.g. https://, exp://, myapp://).', 'INVALID_ARGUMENT')
+
     const actualUdid = await getBootedDeviceId(udid)
-    await run('xcrun', ['simctl', 'openurl', actualUdid, '--', url])
+    await run('xcrun', ['simctl', 'openurl', actualUdid, url])
     return textResult(`Opened URL: ${url}`)
   }
   catch (error) {
@@ -59,7 +65,16 @@ export async function setPermissionsHandler({ udid, action, service, bundle_id }
       service,
       ...(bundle_id ? [bundle_id] : []),
     ])
-    return textResult(`Permission "${service}" ${action}${action === 'reset' ? '' : 'ed'}${bundle_id ? ` for ${bundle_id}` : ''}`)
+    // simctl privacy applies the TCC change by terminating the target app (the
+    // grant is read at launch) — and it does NOT auto-relaunch. Make that
+    // explicit so the agent relaunches instead of treating it as a crash.
+    const restartNote = bundle_id
+      ? ` Note: ${bundle_id} is terminated if running so the change applies — relaunch it (launch_app / expo_launch) to continue.`
+      : ''
+    return textResult(
+      `Permission "${service}" ${action}${action === 'reset' ? '' : 'ed'}${bundle_id ? ` for ${bundle_id}` : ''}.${restartNote}`,
+      bundle_id ? { restartsApp: bundle_id } : undefined,
+    )
   }
   catch (error) {
     return errorResult('Error setting permissions', error)
@@ -171,8 +186,9 @@ export function registerDeviceTools(server: McpServer): void {
     server.tool(
       'open_url',
       'Opens a URL on the iOS Simulator: https:// links, custom URL schemes, and deep links. '
-      + 'For Expo: this is the correct way to point a dev-client build at a specific Metro instance — open the '
-      + 'exp:// or dev-client URL that Metro prints (never via launch env vars).',
+      + 'Opening an app\'s own deep link launches or reloads that app (to interact with an already-running app, use the '
+      + 'ui_* tools instead). For Expo: this is the correct way to point a dev-client build at a specific Metro instance '
+      + '— open the exp:// or dev-client URL that Metro prints (never via launch env vars).',
       {
         udid: udidSchema,
         url: z.string().min(1).max(2048).describe('URL to open (e.g. https://example.com, exp://192.168.1.10:8081, myapp://path)'),
@@ -187,7 +203,9 @@ export function registerDeviceTools(server: McpServer): void {
       'set_permissions',
       'Grants, revokes, or resets a privacy permission (camera, microphone, location, photos, contacts, calendar, '
       + 'reminders, motion, media-library, siri) for an app. Pre-grant permissions before automation runs so system '
-      + 'permission dialogs never block the flow. Note: this does not cover the notifications prompt.',
+      + 'permission dialogs never block the flow. Applying a change terminates the target app if it is running (TCC is '
+      + 'read at launch), so set permissions before launching, then launch_app/expo_launch. '
+      + 'Note: this does not cover the notifications prompt.',
       {
         udid: udidSchema,
         action: z.enum(['grant', 'revoke', 'reset']).describe('What to do with the permission'),
