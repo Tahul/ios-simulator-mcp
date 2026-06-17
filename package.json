@@ -1,6 +1,6 @@
 {
   "name": "@yaelg/ios-simulator-mcp",
-  "version": "1.0.17",
+  "version": "1.0.18",
   "description": "MCP server for interacting with the iOS simulator",
   "type": "module",
   "private": false,
