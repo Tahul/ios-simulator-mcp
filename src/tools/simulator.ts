@@ -1,13 +1,14 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
 import { z } from 'zod'
-import { listDevices, resolveBootedUdid, setDefaultDevice, shutdownDevice } from '../lib/baguette'
+import { bootDevice, listDevices, resolveBootedUdid, setDefaultDevice, shutdownDevice } from '../lib/baguette'
 import { isToolFiltered } from '../lib/constants'
 import { errorResult, textResult, ToolError } from '../lib/errors'
 
 export async function getBootedSimIdHandler({ udid }: { udid?: string } = {}): Promise<CallToolResult> {
   try {
-    const id = await resolveBootedUdid(udid)
+    // A status query: report what is actually booted, never boot one.
+    const id = await resolveBootedUdid(udid, { autoBoot: false })
     const { running } = await listDevices()
     const device = running.find(d => d.udid === id)
     return textResult(
@@ -38,7 +39,8 @@ export async function listSimsHandler(): Promise<CallToolResult> {
 
 export async function shutdownSimHandler({ udid }: { udid?: string }): Promise<CallToolResult> {
   try {
-    const actualUdid = await resolveBootedUdid(udid)
+    // Booting a simulator just to shut it down would be absurd.
+    const actualUdid = await resolveBootedUdid(udid, { autoBoot: false })
     await shutdownDevice(actualUdid)
     return textResult(`Shut down ${actualUdid}.`)
   }
@@ -60,17 +62,29 @@ export async function selectDefaultDeviceHandler({ udid, name }: SelectDefaultDe
     }
 
     const { running, available } = await listDevices()
-    const all = [...running, ...available]
+    // Resolve by exact udid, or by name preferring an already-booted match so
+    // we don't pin a shutdown clone when a live one exists.
+    const lname = name?.toLowerCase()
     const device = udid
-      ? all.find(d => d.udid === udid)
-      : all.find(d => d.name.toLowerCase().includes(name!.toLowerCase()))
+      ? [...running, ...available].find(d => d.udid === udid)
+      : (running.find(d => d.name.toLowerCase().includes(lname!))
+        ?? available.find(d => d.name.toLowerCase().includes(lname!)))
     if (!device)
       throw new ToolError(`No simulator matching ${udid ?? name}.`, 'DEVICE_NOT_FOUND')
 
+    // A default the screen/input tools cannot reach is useless and surfaces as
+    // cryptic geometry 404s on every later call — so boot it if it is not
+    // already running. bootDevice is idempotent for an already-booted device.
+    let bootNote = ''
+    if (!running.some(d => d.udid === device.udid)) {
+      await bootDevice(device.udid)
+      bootNote = ' (booted it)'
+    }
+
     setDefaultDevice(device.udid)
     return textResult(
-      `Default device set to ${device.name} (${device.udid}). Subsequent tools target it unless a udid is passed.`,
-      { udid: device.udid, name: device.name },
+      `Default device set to ${device.name} (${device.udid})${bootNote}. Subsequent tools target it unless a udid is passed.`,
+      { udid: device.udid, name: device.name, booted: true },
     )
   }
   catch (error) {
@@ -115,7 +129,9 @@ export function registerSimulatorTools(server: McpServer): void {
     server.tool(
       'select_default_device',
       'Sets a session default simulator (by udid or name) so subsequent tools target it without passing udid every '
-      + 'time. Call with no arguments to clear it. An explicit udid argument always overrides this default.',
+      + 'time, booting it first if it is not already running so screen/input tools work immediately (otherwise a pinned '
+      + 'but shutdown device causes geometry/snapshot failures). Call with no arguments to clear it. An explicit udid '
+      + 'argument always overrides this default.',
       {
         udid: z.string().optional().describe('UDID of the simulator to make default'),
         name: z.string().optional().describe('Device name to match (e.g. "iPhone 17 Pro")'),

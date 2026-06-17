@@ -179,15 +179,24 @@ export function getDefaultDevice(): string | null {
   return defaultUdid
 }
 
-/** Returns the UDID of the target device, honoring explicit > default > sole booted. */
-export async function resolveBootedUdid(explicit?: string): Promise<string> {
+/**
+ * Returns the UDID of the target device, honoring explicit > default > sole
+ * booted. When nothing is booted and `autoBoot` is set (default), boots the
+ * first available simulator so calls always route to a device. `autoBoot:false`
+ * keeps the old "fail if nothing is booted" behavior for query/teardown tools
+ * (get_booted_sim_id, shutdown_sim, cleanup_session) that must not boot a sim.
+ */
+export async function resolveBootedUdid(
+  explicit?: string,
+  { autoBoot = true }: { autoBoot?: boolean } = {},
+): Promise<string> {
   if (explicit)
     return explicit
   if (defaultUdid)
     return defaultUdid
-  const { running } = await listDevices()
-  if (running.length === 0)
-    throw new ToolError('No booted simulator found. Boot one with boot_sim.', 'NO_BOOTED_SIM')
+  const { running, available } = await listDevices()
+  if (running.length === 1)
+    return running[0]!.udid
   if (running.length > 1) {
     const choices = running.map(d => `${d.name} (${d.udid})`).join(', ')
     throw new ToolError(
@@ -196,7 +205,20 @@ export async function resolveBootedUdid(explicit?: string): Promise<string> {
       'Pass udid explicitly, or call select_default_device once for this session.',
     )
   }
-  return running[0]!.udid
+
+  // Nothing is booted.
+  if (!autoBoot)
+    throw new ToolError('No booted simulator found. Boot one with boot_sim.', 'NO_BOOTED_SIM')
+
+  const target = available[0]
+  if (!target) {
+    throw new ToolError(
+      'No simulators available to boot. Create one in Xcode (Window > Devices and Simulators).',
+      'NO_BOOTED_SIM',
+    )
+  }
+  await bootDevice(target.udid)
+  return target.udid
 }
 
 interface OkResult {

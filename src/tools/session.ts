@@ -58,7 +58,8 @@ export async function cleanupSessionHandler({
     if (needsDevice) {
       let actualUdid: string | null = null
       try {
-        actualUdid = await getBootedDeviceId(udid)
+        // Cleanup acts on an existing session — never boot a sim just to tidy it.
+        actualUdid = await getBootedDeviceId(udid, { autoBoot: false })
       }
       catch {
         lines.push('[skipped] device cleanup: no booted simulator found')

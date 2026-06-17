@@ -76,7 +76,10 @@ export function getDefaultDevice(): string | null {
  * session default > booted simulator. Prefers baguette's device list (the
  * primary backend) and falls back to simctl's own booted-device lookup.
  */
-export async function getBootedDeviceId(deviceId?: string): Promise<string> {
+export async function getBootedDeviceId(
+  deviceId?: string,
+  { autoBoot = true }: { autoBoot?: boolean } = {},
+): Promise<string> {
   if (deviceId)
     return deviceId
 
@@ -85,7 +88,7 @@ export async function getBootedDeviceId(deviceId?: string): Promise<string> {
     return def
 
   try {
-    return await resolveBootedUdid()
+    return await resolveBootedUdid(undefined, { autoBoot })
   }
   catch {
     const { id } = await getBootedDevice()

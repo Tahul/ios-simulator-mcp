@@ -177,9 +177,31 @@ describe('resolveBootedUdid', () => {
     expect(await resolveBootedUdid()).toBe('RUN')
   })
 
-  it('throws when nothing is booted', async () => {
+  it('auto-boots the first available simulator when nothing is running', async () => {
+    let bootedUdid = ''
+    setFetchImpl((async (url: string, init?: { method?: string }) => {
+      if ((init?.method ?? 'GET') === 'POST' && url.includes('/boot'))
+        bootedUdid = url.match(/simulators\/([^/]+)\/boot/)?.[1] ?? ''
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ running: [], available: [{ udid: 'AVAIL', name: 'iPhone 17', runtime: 'iOS', state: 'Shutdown' }] }),
+        arrayBuffer: async () => new ArrayBuffer(0),
+      }
+    }) as any)
+
+    expect(await resolveBootedUdid()).toBe('AVAIL')
+    expect(bootedUdid).toBe('AVAIL')
+  })
+
+  it('does not auto-boot when autoBoot is false', async () => {
+    stub(() => ({ body: JSON.stringify({ running: [], available: [{ udid: 'AVAIL', name: 'iPhone 17', runtime: 'iOS', state: 'Shutdown' }] }) }))
+    await expect(resolveBootedUdid(undefined, { autoBoot: false })).rejects.toThrow(/No booted simulator/)
+  })
+
+  it('throws when nothing is booted and none can be auto-booted', async () => {
     stub(() => ({ body: JSON.stringify({ running: [], available: [] }) }))
-    expect(resolveBootedUdid()).rejects.toThrow(/No booted simulator/)
+    await expect(resolveBootedUdid()).rejects.toThrow(/No simulators available to boot/)
   })
 
   it('requires an explicit/default target when multiple simulators are booted', async () => {

@@ -22,7 +22,7 @@ const INSTRUCTIONS = `iOS Simulator automation. Screen control, input, and the a
 
 Workflow:
 - If anything misbehaves or at session start, call doctor — it reports baguette/Xcode/simctl/Metro health and how to fix gaps.
-- Every tool accepts an optional \`udid\` and defaults to the booted simulator — do not look it up first. To pin a device for the session, call select_default_device once. List devices with list_sims; boot with boot_sim.
+- Every tool accepts an optional \`udid\` and defaults to the booted simulator, auto-booting the first available one when nothing is running — so you never need to boot or look one up before acting (the first such call pays the boot time). To pin a specific device for the session, call select_default_device once (it boots that device if needed). List devices with list_sims; boot explicitly with boot_sim. (shutdown_sim/get_booted_sim_id/cleanup_session never auto-boot; if several sims are booted, pass udid or select_default_device.)
 - See the screen with ui_snapshot (compact, ref-based, from the accessibility tree) or ui_inspect (snapshot + screenshot in one call), or ui_view for just the image.
 - COORDINATES ARE DEVICE POINTS — not pixels, not normalized. The screen size is resolved for you; just pass x/y in points, or (better) target by label/ref so you never compute coordinates.
 - Act by passing \`label\` (preferred) or \`ref\` to ui_tap / ui_type. Refs are renumbered by every ui_snapshot, so a reused ref can hit a different element — re-snapshot before reusing one, or target by label.
