@@ -2,6 +2,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
 import { Buffer } from 'node:buffer'
 import fs from 'node:fs'
+import path from 'node:path'
 import { z } from 'zod'
 import { captureScreenshot, resolveBootedUdid } from '../lib/baguette'
 import { isToolFiltered, udidSchema } from '../lib/constants'
@@ -44,6 +45,9 @@ export async function screenshotHandler({ udid, output_path, quality, scale }: S
       return inlineImageResult(base64)
 
     const absolutePath = ensureAbsolutePath(output_path)
+    // Create the parent dir so a nested output_path (e.g. artifacts/shot.jpg)
+    // doesn't fail with ENOENT.
+    fs.mkdirSync(path.dirname(absolutePath), { recursive: true })
     fs.writeFileSync(absolutePath, Buffer.from(base64, 'base64'))
     return textResult(`Wrote screenshot to: ${absolutePath}`)
   }

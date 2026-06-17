@@ -437,6 +437,14 @@ async function streamOpenError(udid: string, bases: string[], lastError: unknown
         'Use get_booted_sim_id, pass a booted udid, or call boot_sim/select_default_device.',
       )
     }
+    // The HTTP API answered and the device is booted, but the WebSocket upgrade
+    // failed — a stream-specific problem, not an unreachable server. Don't tell
+    // the user to start baguette (it is clearly running).
+    return new ToolError(
+      `baguette HTTP is reachable and ${udid} is booted, but the WebSocket stream at ${bases.join(', ')} could not be opened (${(lastError as Error)?.message ?? 'unknown'}).`,
+      'BAGUETTE_UNREACHABLE',
+      'baguette is up but its stream socket failed: confirm the build serves the /simulators/:udid/stream WebSocket and that any proxy forwards WebSocket upgrades.',
+    )
   }
   catch {
     // If even the device list is unreachable, the baguette server itself is the

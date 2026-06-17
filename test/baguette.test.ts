@@ -307,6 +307,15 @@ describe('WS request/reply FIFO', () => {
     await expect(withSession('STALE', async () => {})).rejects.toThrow(/that simulator is not booted/)
   })
 
+  it('explains when baguette HTTP works but the stream socket fails', async () => {
+    globalThis.WebSocket = ClosingBeforeOpenWebSocket as unknown as typeof WebSocket
+    stub(url => url.endsWith('/simulators.json')
+      ? { body: JSON.stringify({ running: [{ udid: 'UDID', name: 'iPhone 17 Pro', runtime: 'iOS', state: 'Booted' }], available: [] }) }
+      : { status: 404 })
+
+    await expect(withSession('UDID', async () => {})).rejects.toThrow(/HTTP is reachable/)
+  })
+
   it('rejects pending requests when the stream closes after opening', async () => {
     process.env.BAGUETTE_URL = 'https://ios.yael.dev'
     globalThis.WebSocket = ClosingAfterSendWebSocket as unknown as typeof WebSocket

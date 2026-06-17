@@ -2,6 +2,8 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
 import type { Buffer } from 'node:buffer'
 import { spawn } from 'node:child_process'
+import fs from 'node:fs'
+import path from 'node:path'
 import { z } from 'zod'
 import { isToolFiltered, udidSchema } from '../lib/constants'
 import { getBootedDeviceId } from '../lib/devices'
@@ -149,6 +151,8 @@ export async function recordVideoHandler({ udid, output_path, codec, display, ma
     const actualUdid = await getBootedDeviceId(udid)
     const defaultFileName = `simulator_recording_${Date.now()}.mp4`
     const outputFile = ensureAbsolutePath(output_path ?? defaultFileName)
+    // Create the parent dir so a nested output_path doesn't make simctl fail.
+    fs.mkdirSync(path.dirname(outputFile), { recursive: true })
 
     const recordingProcess = currentSpawner('xcrun', [
       'simctl',
