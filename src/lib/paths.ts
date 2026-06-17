@@ -28,6 +28,17 @@ export function ensureAbsolutePath(filePath: string): string {
   return path.join(defaultDir, filePath)
 }
 
+/**
+ * Resolves an output path to absolute and creates its parent directory
+ * (recursively) so a nested output_path (e.g. "artifacts/shots/x.jpg") never
+ * fails to write with ENOENT. Use this for every tool that saves a file.
+ */
+export function prepareOutputPath(filePath: string): string {
+  const absolute = ensureAbsolutePath(filePath)
+  fs.mkdirSync(path.dirname(absolute), { recursive: true })
+  return absolute
+}
+
 const TMP_PREFIX = 'ios-simulator-mcp-'
 
 let tmpRoot: string | null = null

@@ -41,6 +41,7 @@ afterEach(() => {
   delete process.env.BAGUETTE_URL
   delete process.env.BAGUETTE_TOKEN
   delete process.env.BAGUETTE_AUTH_TOKEN
+  delete process.env.BAGUETTE_API_TOKEN
   if (origWebSocket)
     globalThis.WebSocket = origWebSocket
 })
@@ -142,6 +143,11 @@ describe('listDevices', () => {
     const list = await listDevices()
     expect(list.running).toHaveLength(1)
     expect(list.running[0]?.udid).toBe('A')
+  })
+
+  it('surfaces a 401 device list as an auth error pointing at BAGUETTE_TOKEN', async () => {
+    stub(() => ({ status: 401, body: '{"ok":false,"error":"unauthorized"}' }))
+    await expect(listDevices()).rejects.toThrow(/Set BAGUETTE_TOKEN/)
   })
 
   it('uses /api/v1 and Bearer auth for hosted/authenticated baguette', async () => {
@@ -287,8 +293,9 @@ describe('WS request/reply FIFO', () => {
   })
 
   it('rejects immediately when the stream closes before opening', async () => {
-    process.env.BAGUETTE_URL = 'https://ios.yael.dev'
     globalThis.WebSocket = ClosingBeforeOpenWebSocket as unknown as typeof WebSocket
+    // HTTP probe also down → the diagnosis falls back to the low-level WS error.
+    setFetchImpl((async () => { throw new Error('refused') }) as any)
 
     await expect(withSession('UDID', async () => {})).rejects.toThrow(/closed before opening/)
   })
@@ -305,6 +312,24 @@ describe('WS request/reply FIFO', () => {
       : { status: 404 })
 
     await expect(withSession('STALE', async () => {})).rejects.toThrow(/that simulator is not booted/)
+  })
+
+  it('reads the token from BAGUETTE_API_TOKEN and appends it to the WS url', async () => {
+    process.env.BAGUETTE_API_TOKEN = 'api-tok'
+    globalThis.WebSocket = FakeWebSocket as unknown as typeof WebSocket
+
+    await withSession('UDID', async (session) => {
+      session.send({ type: 'button', button: 'home' })
+    })
+
+    expect(FakeWebSocket.urls[0]).toContain('token=api-tok')
+  })
+
+  it('surfaces an unauthorized baguette when a stream cannot open', async () => {
+    globalThis.WebSocket = ClosingBeforeOpenWebSocket as unknown as typeof WebSocket
+    stub(() => ({ status: 401, body: '{"ok":false,"error":"unauthorized"}' }))
+
+    await expect(withSession('UDID', async () => {})).rejects.toThrow(/Set BAGUETTE_TOKEN/)
   })
 
   it('explains when baguette HTTP works but the stream socket fails', async () => {

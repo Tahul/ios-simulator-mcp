@@ -1,3 +1,4 @@
+import type { ErrorCode } from './errors'
 import { Buffer } from 'node:buffer'
 import { ToolError } from './errors'
 
@@ -60,7 +61,17 @@ export function setWsSessionFactory(factory: WsSessionFactory | null): void {
 const HTTP_TIMEOUT_MS = 10000
 
 function baguetteToken(): string | null {
-  return process.env.BAGUETTE_TOKEN?.trim() || process.env.BAGUETTE_AUTH_TOKEN?.trim() || null
+  // BAGUETTE_API_TOKEN is the var baguette itself runs with; accept it too so a
+  // shared environment needs no separate config.
+  return process.env.BAGUETTE_TOKEN?.trim()
+    || process.env.BAGUETTE_AUTH_TOKEN?.trim()
+    || process.env.BAGUETTE_API_TOKEN?.trim()
+    || null
+}
+
+/** 401/403 → a clear auth error; anything else keeps the caller's fallback code. */
+function authAwareCode(status: number, fallback: ErrorCode): ErrorCode {
+  return status === 401 || status === 403 ? 'BAGUETTE_UNAUTHORIZED' : fallback
 }
 
 function authHeaders(): Record<string, string> | undefined {
@@ -161,7 +172,7 @@ function statusMessage(action: string, status: number): string {
 export async function listDevices(): Promise<DeviceList> {
   const { status, text } = await httpFetch(base => apiPath(base, '/api/v1/simulators', '/simulators.json'))
   if (status !== 200)
-    throw new ToolError(statusMessage('baguette list', status), status === 401 || status === 403 ? 'INVALID_ARGUMENT' : 'UNKNOWN')
+    throw new ToolError(statusMessage('baguette list', status), authAwareCode(status, 'UNKNOWN'))
   const data = parseJson<Partial<DeviceList>>(text, 'device list')
   return { running: data.running ?? [], available: data.available ?? [] }
 }
@@ -251,7 +262,7 @@ export async function bootDevice(udid: string): Promise<{ alreadyBooted: boolean
     if (running.some(d => d.udid === udid))
       return { alreadyBooted: true }
   }
-  throw new ToolError(body.error ? `boot failed: ${body.error}` : statusMessage('boot', status), status === 401 || status === 403 ? 'INVALID_ARGUMENT' : 'UNKNOWN')
+  throw new ToolError(body.error ? `boot failed: ${body.error}` : statusMessage('boot', status), authAwareCode(status, 'UNKNOWN'))
 }
 
 export async function shutdownDevice(udid: string): Promise<void> {
@@ -261,7 +272,7 @@ export async function shutdownDevice(udid: string): Promise<void> {
   )
   if (status !== 200) {
     const body = parseOk(text)
-    throw new ToolError(body.error ? `shutdown failed: ${body.error}` : statusMessage('shutdown', status), status === 401 || status === 403 ? 'INVALID_ARGUMENT' : 'UNKNOWN')
+    throw new ToolError(body.error ? `shutdown failed: ${body.error}` : statusMessage('shutdown', status), authAwareCode(status, 'UNKNOWN'))
   }
 }
 
@@ -278,7 +289,7 @@ export async function setOrientation(udid: string, value: Orientation): Promise<
   )
   if (status !== 200) {
     const body = parseOk(text)
-    throw new ToolError(body.error ? `orientation failed: ${body.error}` : statusMessage('orientation', status), status === 401 || status === 403 ? 'INVALID_ARGUMENT' : 'UNKNOWN')
+    throw new ToolError(body.error ? `orientation failed: ${body.error}` : statusMessage('orientation', status), authAwareCode(status, 'UNKNOWN'))
   }
 }
 
@@ -333,7 +344,7 @@ export async function getScreenSize(udid: string): Promise<ScreenSize> {
     base => apiPath(base, `/api/v1/simulators/${udid}/definition.json`, `/simulators/${udid}/chrome.json`),
   )
   if (status !== 200)
-    throw new ToolError(status === 401 || status === 403 ? statusMessage('screen geometry', status) : `Could not read screen geometry for ${udid} (HTTP ${status})`, status === 401 || status === 403 ? 'INVALID_ARGUMENT' : 'DEVICE_NOT_FOUND')
+    throw new ToolError(status === 401 || status === 403 ? statusMessage('screen geometry', status) : `Could not read screen geometry for ${udid} (HTTP ${status})`, authAwareCode(status, 'DEVICE_NOT_FOUND'))
 
   const geometry = parseJson<ChromeLayout & SimulatorDefinition>(text, 'screen geometry')
   const size = screenSizeFromGeometry(geometry)
@@ -376,7 +387,7 @@ export async function captureScreenshot(udid: string, opts: { quality?: number, 
         )
       }
       if (!res.ok)
-        throw new ToolError(statusMessage('screenshot', res.status), res.status === 401 || res.status === 403 ? 'INVALID_ARGUMENT' : 'UNKNOWN')
+        throw new ToolError(statusMessage('screenshot', res.status), authAwareCode(res.status, 'UNKNOWN'))
       const buf = await res.arrayBuffer()
       return Buffer.from(buf).toString('base64')
     }
@@ -446,9 +457,14 @@ async function streamOpenError(udid: string, bases: string[], lastError: unknown
       'baguette is up but its stream socket failed: confirm the build serves the /simulators/:udid/stream WebSocket and that any proxy forwards WebSocket upgrades.',
     )
   }
-  catch {
-    // If even the device list is unreachable, the baguette server itself is the
-    // failure; report that instead of leaking a low-level WebSocket error.
+  catch (listError) {
+    // If the HTTP probe failed because baguette needs a token, THAT is why the
+    // stream won't open — surface it instead of a misleading "unreachable" or
+    // "no simulator is booted". (The WS handshake can't see the 401 itself.)
+    if (listError instanceof ToolError && listError.code === 'BAGUETTE_UNAUTHORIZED')
+      return listError
+    // Otherwise the baguette server itself is unreachable; report that rather
+    // than leaking a low-level WebSocket error.
   }
 
   return new ToolError(

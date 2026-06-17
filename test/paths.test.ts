@@ -1,7 +1,8 @@
+import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { afterEach, describe, expect, it } from 'bun:test'
-import { ensureAbsolutePath, expandTilde } from '../src/lib/paths'
+import { ensureAbsolutePath, expandTilde, prepareOutputPath } from '../src/lib/paths'
 
 const ORIGINAL_ENV = process.env.IOS_SIMULATOR_MCP_DEFAULT_OUTPUT_DIR
 
@@ -45,5 +46,21 @@ describe('ensureAbsolutePath', () => {
   it('expands tilde in IOS_SIMULATOR_MCP_DEFAULT_OUTPUT_DIR', () => {
     process.env.IOS_SIMULATOR_MCP_DEFAULT_OUTPUT_DIR = '~/captures'
     expect(ensureAbsolutePath('shot.png')).toBe(path.join(os.homedir(), 'captures', 'shot.png'))
+  })
+})
+
+describe('prepareOutputPath', () => {
+  it('creates missing parent directories recursively and returns the absolute path', () => {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'prep-'))
+    try {
+      const target = path.join(base, 'a', 'b', 'c', 'shot.jpg')
+      const result = prepareOutputPath(target)
+
+      expect(result).toBe(target)
+      expect(fs.existsSync(path.dirname(target))).toBe(true)
+    }
+    finally {
+      fs.rmSync(base, { recursive: true, force: true })
+    }
   })
 })

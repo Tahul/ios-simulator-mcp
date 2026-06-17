@@ -4,7 +4,7 @@ import { z } from 'zod'
 import { listDevices, resolveBaseUrls } from '../lib/baguette'
 import { isToolFiltered } from '../lib/constants'
 import { parseDeviceList } from '../lib/devices'
-import { textResult } from '../lib/errors'
+import { textResult, ToolError } from '../lib/errors'
 import { normalizeMetroUrl, waitForMetro } from '../lib/metro'
 import { resolveIdbPath, run } from '../lib/run'
 
@@ -52,7 +52,9 @@ export async function doctorHandler({ metro_url }: DoctorParams): Promise<CallTo
     baguetteDetail = `reachable (${running.length} booted, ${available.length} available)`
   }
   catch (error) {
-    baguetteDetail = `unreachable at ${bases.join(', ')}: ${(error as Error).message.split('\n')[0]}`
+    baguetteDetail = error instanceof ToolError && error.code === 'BAGUETTE_UNAUTHORIZED'
+      ? `reachable but UNAUTHORIZED at ${bases.join(', ')} — set BAGUETTE_TOKEN to your baguette token`
+      : `unreachable at ${bases.join(', ')}: ${(error as Error).message.split('\n')[0]}`
   }
   checks.push({ name: 'baguette', ok: baguetteOk, detail: baguetteDetail })
 

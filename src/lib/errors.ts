@@ -10,6 +10,7 @@ export type ErrorCode
   = | 'NO_BOOTED_SIM'
     | 'DEVICE_NOT_FOUND'
     | 'BAGUETTE_UNREACHABLE'
+    | 'BAGUETTE_UNAUTHORIZED'
     | 'METRO_UNREACHABLE'
     | 'ELEMENT_NOT_FOUND'
     | 'STALE_REF'
@@ -25,6 +26,7 @@ const RECOVERY: Partial<Record<ErrorCode, string>> = {
   NO_BOOTED_SIM: 'Call boot_sim (or expo_launch, which boots automatically).',
   DEVICE_NOT_FOUND: 'Call doctor or boot_sim to see available simulators.',
   BAGUETTE_UNREACHABLE: 'Start `baguette serve`, or set BAGUETTE_URL/BAGUETTE_TOKEN.',
+  BAGUETTE_UNAUTHORIZED: 'baguette requires auth. Set BAGUETTE_TOKEN in the MCP server env to your baguette token (the value baguette runs with as BAGUETTE_API_TOKEN / --api-token).',
   METRO_UNREACHABLE: 'Start Metro with `npx expo start`, or pass metro_url.',
   ELEMENT_NOT_FOUND: 'Call ui_snapshot to see the current screen.',
   STALE_REF: 'Call ui_snapshot again to refresh element refs.',
@@ -73,6 +75,8 @@ export function errorWithTroubleshooting(message: string): string {
  */
 export function inferErrorCode(message: string): ErrorCode {
   const m = message.toLowerCase()
+  if (m.includes('unauthorized') || m.includes('http 401') || m.includes('forbidden') || m.includes('http 403'))
+    return 'BAGUETTE_UNAUTHORIZED'
   if (m.includes('no booted simulator'))
     return 'NO_BOOTED_SIM'
   if (m.includes('idb') && (m.includes('not found') || m.includes('enoent') || m.includes('command not found')))
